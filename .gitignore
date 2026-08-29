@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Packaging
+*.egg-info/
+dist/
+dist*/
+*.whl
+*.tar.gz
+build/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local captures and analysis output
+*.har
+*.HAR
+work/
+*.pcap
+*.jsonl
+*-results.json
+benchmark-results.json
+work-graph.json
+
+# Local environment files
+.env
+.env.*
+!.env.example

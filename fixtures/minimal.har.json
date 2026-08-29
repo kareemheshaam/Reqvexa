@@ -1,0 +1,47 @@
+{
+  "log": {
+    "version": "1.2",
+    "creator": {"name": "Reqvexa fixture", "version": "0.1"},
+    "entries": [
+      {
+        "startedDateTime": "2026-08-29T00:00:00Z",
+        "time": 1,
+        "timings": {"wait": 1},
+        "request": {
+          "method": "GET",
+          "url": "https://reqvexa.local/",
+          "headers": [],
+          "cookies": []
+        },
+        "response": {
+          "status": 200,
+          "headers": [
+            {"name": "Set-Cookie", "value": "session=A"}
+          ],
+          "cookies": [],
+          "content": {"mimeType": "text/html", "text": "<html></html>"}
+        }
+      },
+      {
+        "startedDateTime": "2026-08-29T00:00:01Z",
+        "time": 1,
+        "timings": {"wait": 1},
+        "request": {
+          "method": "GET",
+          "url": "https://reqvexa.local/api/products",
+          "headers": [
+            {"name": "Cookie", "value": "session=A"},
+            {"name": "X-Signature", "value": "opaque-client-value"}
+          ],
+          "cookies": []
+        },
+        "response": {
+          "status": 200,
+          "headers": [{"name": "Content-Type", "value": "application/json"}],
+          "cookies": [],
+          "content": {"mimeType": "application/json", "text": "{\"ok\":true}"}
+        }
+      }
+    ]
+  }
+}

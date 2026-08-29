@@ -1,0 +1,20 @@
+[
+  {
+    "id": "simple-cookie",
+    "target_request": "request_for_target",
+    "expected_logical_values": ["session"],
+    "expected_versions": ["A"],
+    "expected_producer_relationships": ["response_set_cookie -> session(A)"],
+    "unsupported_relationships": [],
+    "expected_trace_roots": ["response_set_cookie"]
+  },
+  {
+    "id": "client-generated-candidate",
+    "target_request": "request_for_target",
+    "expected_logical_values": ["x-signature"],
+    "expected_versions": ["never-seen"],
+    "expected_producer_relationships": [],
+    "unsupported_relationships": ["javascript-confirmed"],
+    "expected_trace_roots": ["UNKNOWN"]
+  }
+]
