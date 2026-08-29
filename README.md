@@ -1,5 +1,7 @@
 # Reqvexa
 
+Trace the state behind every HTTP request.
+
 [![Tests](https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml/badge.svg)](https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
