@@ -1,11 +1,16 @@
-# Reqvexa
-
-Trace the state behind every HTTP request.
-
-[![Tests](https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml/badge.svg)](https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.12%2B-3776AB.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Synthetic benchmark](https://img.shields.io/badge/synthetic%20benchmark-16%2F16%20passing-brightgreen.svg)](#development)
+<div align="center">
+  <h1>Reqvexa</h1>
+  <p><strong>Trace the state behind every HTTP request.</strong></p>
+  <p>
+    <a href="https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml"><img src="https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-3776AB.svg" alt="Python 3.12+"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
+    <a href="#development"><img src="https://img.shields.io/badge/synthetic%20benchmark-16%2F16%20passing-brightgreen.svg" alt="Synthetic benchmark: 16/16 passing"></a>
+  </p>
+  <p>
+    <img src="assets/reqvexa-cover.jpg" alt="Reqvexa cover: trace HTTP dependencies from HAR captures" width="100%">
+  </p>
+</div>
 
 Browser traffic shows what happened. It usually does not show why a request
 could work.
@@ -14,8 +19,9 @@ Reqvexa analyzes a HAR file, takes one request as the target, and traces the
 cookies, tokens, headers, and other values that lead to it. The result is a
 request flow with the evidence behind each relationship.
 
-Read the launch article: [How to Trace Cookies and Tokens Across HTTP Requests
-with Reqvexa](https://medium.com/@kareem.hesham/how-to-trace-cookies-and-tokens-across-http-requests-with-reqvexa-f1424f095ae0)
+<p align="center">
+  <a href="https://medium.com/@kareem.hesham/how-to-trace-cookies-and-tokens-across-http-requests-with-reqvexa-f1424f095ae0"><strong>Read the launch article</strong></a>
+</p>
 
 ```text
 Target: POST /api/products
