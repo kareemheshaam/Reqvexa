@@ -14,6 +14,9 @@ Reqvexa analyzes a HAR file, takes one request as the target, and traces the
 cookies, tokens, headers, and other values that lead to it. The result is a
 request flow with the evidence behind each relationship.
 
+Read the launch article: [How to Trace Cookies and Tokens Across HTTP Requests
+with Reqvexa](https://medium.com/@kareem.hesham/how-to-trace-cookies-and-tokens-across-http-requests-with-reqvexa-f1424f095ae0)
+
 ```text
 Target: POST /api/products
 
