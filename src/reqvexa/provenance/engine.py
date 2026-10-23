@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -15,6 +15,7 @@ from reqvexa.models import (
     EdgeType,
     Evidence,
     Graph,
+    HttpResponse,
     LogicalValue,
     Node,
     NodeType,
@@ -50,6 +51,16 @@ class Analysis:
     target_producers: dict[str, tuple[ProducerHypothesis, ...]]
     negative_evidence: dict[str, tuple[str, ...]]
     logical_values: dict[str, LogicalValue]
+    observation_value_ids: dict[str, str] = field(default_factory=dict)
+    versions_by_value: dict[str, tuple[ValueVersion, ...]] = field(default_factory=dict)
+    _versions_index: dict[str, dict[str, ValueVersion]] = field(
+        default_factory=dict, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        """Index versions per logical value for O(1) temporal lookups."""
+        for version in self.versions.values():
+            self._versions_index.setdefault(version.value_id, {})[version.version_id] = version
 
     def trace(self, request_id: str) -> tuple[TraceNode, ...]:
         if request_id not in self.request_observation_ids:
@@ -66,10 +77,11 @@ class Analysis:
 
     def _version_for_observation(self, observation: ValueObservation,
                                  sequence: int) -> ValueVersion | None:
-        value_id = _logical_value_id(observation)
         candidates = [
-            version for version in self.versions.values()
-            if version.value_id == value_id and version.valid_from <= sequence
+            version for version in self._versions_index.get(
+                _logical_value_id(observation), {}
+            ).values()
+            if version.valid_from <= sequence
             and (version.valid_until is None or sequence < version.valid_until)
             and _values_match(version.raw_value, observation.normalized_value)
         ]
@@ -151,14 +163,22 @@ class ProvenanceEngine:
                 item for item in all_observations
                 if not _ignored_observation(item, ignored)
             )
+        response_by_request = {response.request_id: response for response in capture.responses}
+        body_texts: dict[str, str] = {}
         emit("scope", 1, 4, f"Collected {len(all_observations)} observations")
-        observations = self._scope_observations(capture, all_observations, target_request_id)
+        observations = self._scope_observations(
+            capture, all_observations, target_request_id, response_by_request, body_texts
+        )
         emit("versions", 2, 4, "Resolving logical values and versions")
         by_id = {observation.observation_id: observation for observation in observations}
+        observations_by_request: dict[str, list[ValueObservation]] = {}
+        for observation in observations:
+            if observation.request_id:
+                observations_by_request.setdefault(observation.request_id, []).append(observation)
         request_ids = {
-            request.id: tuple(observation.observation_id for observation in observations
-                              if observation.request_id == request.id
-                              and observation.response_id is None
+            request.id: tuple(observation.observation_id for observation in
+                              observations_by_request.get(request.id, ())
+                              if observation.response_id is None
                               and _is_state_observation(observation))
             for request in capture.requests
         }
@@ -166,6 +186,9 @@ class ProvenanceEngine:
         for observation in observations:
             if _is_state_observation(observation):
                 value_obs.setdefault(_logical_value_id(observation), []).append(observation.observation_id)
+        observation_value_ids = {
+            observation_id: value_id for value_id, ids in value_obs.items() for observation_id in ids
+        }
         logical_values = {
             value_id: LogicalValue(
                 value_id=value_id,
@@ -184,7 +207,7 @@ class ProvenanceEngine:
         emit("graph", 3, 4, "Inferring producers and building graph")
         graph = Graph()
         self._add_capture_nodes(graph, capture, cancel_event)
-        for value_id, observation_ids in sorted(value_obs.items()):
+        for value_id in sorted(value_obs):
             if cancel_event is not None and cancel_event.is_set():
                 raise AnalysisCancelled()
             graph.add_node(Node(value_id, NodeType.VALUE, _value_label(value_id), {}))
@@ -200,18 +223,21 @@ class ProvenanceEngine:
                      "valid_from": version.valid_from, "valid_until": version.valid_until},
                 ))
         producers, negative = self._infer_producers(
-            capture, observations, versions, by_id, cancel_event
+            capture, observations, versions, cancel_event, body_texts
         )
         self._add_edges(graph, capture, observations, versions, producers, negative, cancel_event)
         emit("complete", 4, 4, "Analysis complete")
         return Analysis(capture, observations, graph, versions, by_id, request_ids,
                         {key: tuple(value) for key, value in value_obs.items()},
-                        producers, negative, logical_values)
+                        producers, negative, logical_values,
+                        observation_value_ids, _index_versions_by_value(versions))
 
     @staticmethod
     def _scope_observations(capture: Capture,
                             observations: tuple[ValueObservation, ...],
-                            target_request_id: str | None) -> tuple[ValueObservation, ...]:
+                            target_request_id: str | None,
+                            response_by_request: dict[str, HttpResponse],
+                            body_texts: dict[str, str]) -> tuple[ValueObservation, ...]:
         if target_request_id is None:
             return observations
         target = capture.request(target_request_id)
@@ -250,14 +276,11 @@ class ProvenanceEngine:
                     and _value_search_match(item.normalized_value, selected_raw_values)
                     for item in request_observations.get(request.id, ())
                 )
-                response = next(
-                    (item for item in capture.responses if item.request_id == request.id),
-                    None,
-                )
+                response = response_by_request.get(request.id)
                 response_value_match = response_value_match or (
                     response is not None
                     and any(
-                        _response_contains_value(response, value)
+                        _response_contains_value(response, value, body_texts)
                         for value in selected_raw_values
                     )
                 )
@@ -314,8 +337,8 @@ class ProvenanceEngine:
 
     def _infer_producers(self, capture: Capture, observations: tuple[ValueObservation, ...],
                          versions: dict[str, ValueVersion],
-                         by_id: dict[str, ValueObservation],
-                         cancel_event: Any | None = None
+                         cancel_event: Any | None = None,
+                         body_texts: dict[str, str] | None = None
                          ) -> tuple[dict[str, tuple[ProducerHypothesis, ...]], dict[str, tuple[str, ...]]]:
         requests = {request.id: request for request in capture.requests}
         response_by_value: dict[str, list[ValueObservation]] = {}
@@ -323,10 +346,16 @@ class ProvenanceEngine:
             item for item in observations if item.response_id is not None
         ]
         request_by_value: dict[str, list[ValueObservation]] = {}
+        # Response observations indexed by their Bearer-stripped value:
+        # _values_match(left, right) is exactly true when the stripped
+        # representations are equal, so this index is lossless.
+        response_by_stripped: dict[str, list[ValueObservation]] = {}
         for item in observations:
             index = response_by_value if item.response_id is not None else request_by_value
             index.setdefault(_logical_value_id(item), []).append(item)
-        for index in (response_by_value, request_by_value):
+            if item.response_id is not None:
+                response_by_stripped.setdefault(_strip_bearer(item.normalized_value), []).append(item)
+        for index in (response_by_value, request_by_value, response_by_stripped):
             for value_id in index:
                 index[value_id].sort(key=lambda item: (item.sequence, item.observation_id))
         producers: dict[str, list[ProducerHypothesis]] = {}
@@ -350,17 +379,18 @@ class ProvenanceEngine:
                     and _values_match(source.normalized_value, version.raw_value)
                     and _same_origin(source, first_consumer, requests)
             ]
+            candidates: list[ValueObservation] | None = None
             if same_field_candidates:
                 candidates = same_field_candidates
                 method = "EXACT_VALUE"
-                confidence = 1.0
-            else:
+            if not candidates:
                 # Value identity is established by the captured value, not by
                 # producer/consumer field names.
                 candidates = [
-                    source for source in all_response_observations
+                    source for source in response_by_stripped.get(
+                        _strip_bearer(version.raw_value), ()
+                    )
                     if source.sequence < first_consumer.sequence
-                    and _values_match(source.normalized_value, version.raw_value)
                 ]
                 if candidates:
                     same_origin_candidates = [
@@ -370,30 +400,17 @@ class ProvenanceEngine:
                     if same_origin_candidates:
                         candidates = same_origin_candidates
                         method = "CROSS_FIELD_EXACT_MATCH"
-                        confidence = 0.72
                     else:
                         method = "CROSS_ORIGIN_EXACT_MATCH"
-                        confidence = 0.58
-            if not candidates:
-                candidates = [
-                    source for source in all_response_observations
-                    if cancel_event is None or not cancel_event.is_set()
-                    if source.sequence < first_consumer.sequence
-                    and _values_match(source.normalized_value, version.raw_value)
-                    and _same_origin(source, first_consumer, requests)
-                    and _compatible_field(source, first_consumer)
-                ]
-                if candidates:
-                    method = "CROSS_FIELD_EXACT_MATCH"
-                    confidence = 0.72
             if not candidates:
                 decoded_target = decode_base64_candidate(version.raw_value)
-                candidates = [
-                    source for source in all_response_observations
-                    if cancel_event is None or not cancel_event.is_set()
-                    if source.sequence < first_consumer.sequence
-                    and _same_origin(source, first_consumer, requests)
-                    and (
+                transformed: list[ValueObservation] = []
+                for source in all_response_observations:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise AnalysisCancelled()
+                    if source.sequence >= first_consumer.sequence:
+                        continue
+                    if _same_origin(source, first_consumer, requests) and (
                         _values_match(
                             unquote(source.normalized_value),
                             unquote(version.raw_value),
@@ -403,18 +420,18 @@ class ProvenanceEngine:
                             decode_base64_candidate(source.normalized_value) or "",
                             version.raw_value,
                         )
-                    )
-                ]
-                if candidates:
+                    ):
+                        transformed.append(source)
+                if transformed:
+                    candidates = transformed
                     method = "TRANSFORMED_MATCH"
-                    confidence = 0.62
             if not candidates and len(version.raw_value) >= 4:
                 candidates = self._raw_text_candidates(
-                    capture, requests, first_consumer, version.raw_value
+                    capture, requests, first_consumer, version.raw_value, body_texts
                 )
                 if candidates:
                     method = "RAW_TEXT_MATCH"
-                    confidence = 0.68
+            assert candidates is not None
             if not candidates:
                 evidence_id = stable_id("evidence", version_id, "NO_PRIOR_RESPONSE_MATCH")
                 negative[version_id] = [evidence_id]
@@ -458,13 +475,15 @@ class ProvenanceEngine:
         requests: dict[str, Any],
         consumer: ValueObservation,
         value: str,
+        text_cache: dict[str, str] | None = None,
     ) -> list[ValueObservation]:
         candidates: list[ValueObservation] = []
+        texts: dict[str, str] = text_cache if text_cache is not None else {}
         for response in capture.responses:
             source_request = requests.get(response.request_id)
             if source_request is None or source_request.sequence >= consumer.sequence:
                 continue
-            if not _response_contains_value(response, value):
+            if not _response_contains_value(response, value, texts):
                 continue
             candidates.append(ValueObservation(
                 observation_id=stable_id(
@@ -517,13 +536,14 @@ class ProvenanceEngine:
                 raise AnalysisCancelled()
             if observation.request_id:
                 observations_by_request.setdefault(observation.request_id, []).append(observation)
+        versions_by_value = _index_versions_by_value(versions)
         for request in capture.requests:
             if cancel_event is not None and cancel_event.is_set():
                 raise AnalysisCancelled()
             for observation in observations_by_request.get(request.id, ()):
                 if observation.request_id != request.id or observation.response_id is not None:
                     continue
-                version = _version_for(versions, observation, request.sequence)
+                version = _version_for(versions_by_value, observation, request.sequence)
                 if version is not None:
                     edge, evidence = self._edge(request, version.version_id, EdgeType.CONSUMES,
                                                 "TEMPORAL_VERSION_MATCH", 1.0)
@@ -563,17 +583,6 @@ class ProvenanceEngine:
                     "No compatible prior response observation matched this consumed value.",
                     (version_id,), 1.0,
                 ))
-
-    @staticmethod
-    def _candidate_transformed_sources(
-        observations: tuple[ValueObservation, ...],
-        response_by_value: dict[str, list[ValueObservation]],
-        value_id: str,
-    ) -> tuple[ValueObservation, ...]:
-        # Exact logical-value candidates are the only safe pool for transformed
-        # matching. A later field-key refinement can widen this deliberately.
-        return tuple(response_by_value.get(value_id, ()))
-
 
     @staticmethod
     def _edge(observation: Any, target: str, edge_type: EdgeType,
@@ -648,12 +657,19 @@ def _state_hint(hint: str | None) -> bool:
     ))
 
 
-def _version_for(versions: dict[str, ValueVersion], observation: ValueObservation,
+def _index_versions_by_value(versions: dict[str, ValueVersion]) -> dict[str, tuple[ValueVersion, ...]]:
+    grouped: dict[str, list[ValueVersion]] = {}
+    for version in versions.values():
+        grouped.setdefault(version.value_id, []).append(version)
+    return {value_id: tuple(items) for value_id, items in grouped.items()}
+
+
+def _version_for(versions_by_value: dict[str, tuple[ValueVersion, ...]],
+                 observation: ValueObservation,
                  sequence: int) -> ValueVersion | None:
     candidates = [
-        version for version in versions.values()
-        if version.value_id == _logical_value_id(observation)
-        and _values_match(version.raw_value, observation.normalized_value)
+        version for version in versions_by_value.get(_logical_value_id(observation), ())
+        if _values_match(version.raw_value, observation.normalized_value)
         and version.valid_from <= sequence
         and (version.valid_until is None or sequence < version.valid_until)
     ]
@@ -705,7 +721,8 @@ def _value_search_match(value: str, targets: set[str]) -> bool:
     )
 
 
-def _response_contains_value(response: Any, value: str) -> bool:
+def _response_contains_value(response: Any, value: str,
+                             text_cache: dict[str, str] | None = None) -> bool:
     """Search the captured response as text, without inspecting its format."""
     if not value:
         return False
@@ -713,21 +730,21 @@ def _response_contains_value(response: Any, value: str) -> bool:
     texts = [header.value for header in response.headers]
     texts.extend(cookie.value for cookie in response.cookies)
     if response.body:
-        texts.append(response.body.decode("utf-8", errors="replace"))
+        texts.append(_response_text(response, text_cache))
     return any(candidate and candidate in text for candidate in values for text in texts)
+
+
+def _response_text(response: Any, text_cache: dict[str, str] | None = None) -> str:
+    """Decode a response body once and reuse the decoded text across lookups."""
+    cache_key = str(getattr(response, "id", ""))
+    if text_cache is not None and cache_key and cache_key in text_cache:
+        return text_cache[cache_key]
+    text = response.body.decode("utf-8", errors="replace")
+    if text_cache is not None and cache_key:
+        text_cache[cache_key] = text
+    return text
 
 
 def _strip_bearer(value: str) -> str:
     match = re.match(r"^\s*Bearer\s+(.+?)\s*$", value, flags=re.IGNORECASE)
     return match.group(1) if match else value
-
-
-def _compatible_field(source: ValueObservation, target: ValueObservation) -> bool:
-    source_hint = _canonical_hint(source.semantic_hint or _field_leaf(source))
-    target_hint = _canonical_hint(target.semantic_hint or _field_leaf(target))
-    return source_hint == target_hint
-
-
-def _field_leaf(observation: ValueObservation) -> str:
-    path = observation.location.path or ""
-    return path.rsplit(".", 1)[-1].rsplit("/", 1)[-1].split("[", 1)[0]

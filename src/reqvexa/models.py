@@ -118,12 +118,18 @@ class Capture:
     requests: tuple[HttpRequest, ...]
     responses: tuple[HttpResponse, ...]
     source: str = "har"
+    requests_by_id: dict[str, HttpRequest] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "requests_by_id", {request.id: request for request in self.requests})
 
     def request(self, request_id: str) -> HttpRequest:
-        for request in self.requests:
-            if request.id == request_id:
-                return request
-        raise KeyError(f"Unknown request: {request_id}")
+        found = self.requests_by_id.get(request_id)
+        if found is None:
+            raise KeyError(f"Unknown request: {request_id}")
+        return found
 
 
 @dataclass(frozen=True)
@@ -168,17 +174,6 @@ class LogicalValue:
     value_id: str
     observation_ids: tuple[str, ...]
     semantic_hypotheses: tuple[SemanticHypothesis, ...] = ()
-
-
-@dataclass(frozen=True)
-class MatchEvidence:
-    evidence_id: str
-    method: str
-    source_observation: str
-    target_observation: str
-    confidence: float
-    explanation: str
-    transformation: str | None = None
 
 
 @dataclass(frozen=True)
