@@ -7,21 +7,32 @@ requires-python = ">=3.12"
 dependencies = []
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["har", "http", "provenance", "security", "forensics", "tokens", "cookies", "traffic-analysis"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Debuggers",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kareemheshaam/Reqvexa"
+Repository = "https://github.com/kareemheshaam/Reqvexa"
+Issues = "https://github.com/kareemheshaam/Reqvexa/issues"
+"Launch article" = "https://medium.com/@kareem.hesham/how-to-trace-cookies-and-tokens-across-http-requests-with-reqvexa-f1424f095ae0"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.11"]
 gui = ["flet>=0.28"]
 
 [project.scripts]
@@ -29,13 +40,37 @@ reqvexa = "reqvexa.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["reqvexa"]
+omit = ["*/reqvexa/gui.py"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+fail_under = 90
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+ignore = [
+    "E501",   # line wrapping is not enforced until ruff format is adopted
+    "RUF012", # mutable dataclass defaults are handled with field(default_factory=...)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Build scripts and GUI wiring tolerate dynamic checks.
+"tests/*" = ["B008"]
+
 [tool.mypy]
 python_version = "3.12"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
 
 [[tool.mypy.overrides]]
 module = "flet.*"
