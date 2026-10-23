@@ -717,7 +717,7 @@ class ReqvexaApp:
                 self.events.put(("result", (job_id, callback, operation())))
             except AnalysisCancelled:
                 self.events.put(("cancelled", job_id))
-            except Exception as error:  # noqa: BLE001 - surface worker failures in the UI
+            except Exception as error:  # surface worker failures in the UI
                 self.events.put(("error", (job_id, error)))
         threading.Thread(target=worker, daemon=True).start()
 
