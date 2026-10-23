@@ -37,7 +37,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with the safe report privacy contract.
 - Analysis-time performance: request lookup, version lookup, response lookup,
   observation request bucketing, and cross-field value matching are now
-  indexed; a 1,200-entry capture analyzes roughly 4x faster.
+  indexed; a 1,200-entry capture analyzes roughly 4x faster. Producer
+  inference additionally memoizes Bearer-stripping, URL-decoding and
+  Base64-candidate checks, precomputes per-request host origins, and scans
+  prior responses via sorted sequence bounds with origin bucketing - a
+  557-entry capture with 4565 value versions analyzed 3.5x faster with
+  bit-identical provenance output.
 - Ruff linting extended to import sorting (`I`), pyupgrade (`UP`), bugbear
   (`B`), and RUF rules; mypy moved to `disallow_untyped_defs`.
 

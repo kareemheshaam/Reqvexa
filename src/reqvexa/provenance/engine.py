@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -341,10 +342,25 @@ class ProvenanceEngine:
                          body_texts: dict[str, str] | None = None
                          ) -> tuple[dict[str, tuple[ProducerHypothesis, ...]], dict[str, tuple[str, ...]]]:
         requests = {request.id: request for request in capture.requests}
+        origins = {
+            request.id: urlsplit(request.url).netloc.lower()
+            for request in capture.requests
+        }
         response_by_value: dict[str, list[ValueObservation]] = {}
-        all_response_observations = [
-            item for item in observations if item.response_id is not None
-        ]
+        all_response_observations = sorted(
+            (item for item in observations if item.response_id is not None),
+            key=lambda item: (item.sequence, item.observation_id),
+        )
+        # Prior response observations grouped per host origin; a transformed
+        # match may only pair a consumer with a same-origin earlier response.
+        # Sources with an unknown request id are bucketed under None, which a
+        # real consumer origin can never equal.
+        responses_by_origin: dict[str | None, list[ValueObservation]] = {}
+        for item in all_response_observations:
+            responses_by_origin.setdefault(
+                origins.get(item.request_id) if item.request_id is not None else None,
+                [],
+            ).append(item)
         request_by_value: dict[str, list[ValueObservation]] = {}
         # Response observations indexed by their Bearer-stripped value:
         # _values_match(left, right) is exactly true when the stripped
@@ -377,7 +393,7 @@ class ProvenanceEngine:
                     source for source in response_by_value.get(version.value_id, ())
                     if source.sequence < first_consumer.sequence
                     and _values_match(source.normalized_value, version.raw_value)
-                    and _same_origin(source, first_consumer, requests)
+                    and _same_origin(source, first_consumer, origins)
             ]
             candidates: list[ValueObservation] | None = None
             if same_field_candidates:
@@ -395,7 +411,7 @@ class ProvenanceEngine:
                 if candidates:
                     same_origin_candidates = [
                         source for source in candidates
-                        if _same_origin(source, first_consumer, requests)
+                        if _same_origin(source, first_consumer, origins)
                     ]
                     if same_origin_candidates:
                         candidates = same_origin_candidates
@@ -403,21 +419,32 @@ class ProvenanceEngine:
                     else:
                         method = "CROSS_ORIGIN_EXACT_MATCH"
             if not candidates:
-                decoded_target = decode_base64_candidate(version.raw_value)
+                decoded_target = _decode_b64_cached(version.raw_value)
+                consumer_origin = (
+                    origins.get(first_consumer.request_id)
+                    if first_consumer.request_id is not None else None
+                )
+                prior_same_origin: tuple[ValueObservation, ...] = (
+                    tuple(responses_by_origin.get(consumer_origin, ()))
+                    if consumer_origin is not None else ()
+                )
+                # Bucket keeps the globally sorted ascending order, so the
+                # first observation at or past the consumer ends the scan.
                 transformed: list[ValueObservation] = []
-                for source in all_response_observations:
+                for source in prior_same_origin:
                     if cancel_event is not None and cancel_event.is_set():
                         raise AnalysisCancelled()
                     if source.sequence >= first_consumer.sequence:
-                        continue
-                    if _same_origin(source, first_consumer, requests) and (
+                        break
+                    if (
                         _values_match(
-                            unquote(source.normalized_value),
-                            unquote(version.raw_value),
+                            _unquote_cached(source.normalized_value),
+                            _unquote_cached(version.raw_value),
                         )
-                        or (decoded_target is not None and source.normalized_value == decoded_target)
+                        or (decoded_target is not None
+                            and source.normalized_value == decoded_target)
                         or _values_match(
-                            decode_base64_candidate(source.normalized_value) or "",
+                            _decode_b64_cached(source.normalized_value) or "",
                             version.raw_value,
                         )
                     ):
@@ -694,12 +721,13 @@ def aggregate_confidence(scores: tuple[float, ...]) -> float:
 
 
 def _same_origin(source: ValueObservation, target: ValueObservation,
-                 requests: dict[str, Any]) -> bool:
-    source_request = requests.get(source.request_id or "")
-    target_request = requests.get(target.request_id or "")
-    if source_request is None or target_request is None:
+                 origins: dict[str, str]) -> bool:
+    """True when source and target requests share the same host:port."""
+    source_origin = origins.get(source.request_id or "")
+    target_origin = origins.get(target.request_id or "")
+    if source_origin is None or target_origin is None:
         return False
-    return urlsplit(source_request.url).netloc.lower() == urlsplit(target_request.url).netloc.lower()
+    return source_origin == target_origin
 
 
 def _values_match(left: str, right: str) -> bool:
@@ -712,8 +740,8 @@ def _values_match(left: str, right: str) -> bool:
 def _value_search_match(value: str, targets: set[str]) -> bool:
     if any(_values_match(value, target) for target in targets):
         return True
-    decoded_value = unquote(value)
-    decoded_base64 = decode_base64_candidate(value)
+    decoded_value = _unquote_cached(value)
+    decoded_base64 = _decode_b64_cached(value)
     return any(
         _values_match(decoded_value, target)
         or (decoded_base64 is not None and _values_match(decoded_base64, target))
@@ -745,6 +773,12 @@ def _response_text(response: Any, text_cache: dict[str, str] | None = None) -> s
     return text
 
 
+@cache
 def _strip_bearer(value: str) -> str:
+    """Strip a Bearer transport prefix; memoized for repeat comparisons."""
     match = re.match(r"^\s*Bearer\s+(.+?)\s*$", value, flags=re.IGNORECASE)
     return match.group(1) if match else value
+
+
+_unquote_cached = cache(unquote)
+_decode_b64_cached = cache(decode_base64_candidate)
