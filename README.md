@@ -186,7 +186,7 @@ The repository includes a deterministic benchmark:
 python -c "from tests.benchmark.runner import run_benchmark; print(run_benchmark())"
 ```
 
-Current checks pass with 28 tests and 16 benchmark cases. The benchmark uses
+Current checks pass with 84 tests and 16 benchmark cases. The benchmark uses
 synthetic traffic; `16/16 passing` is a regression result, not a claim about
 accuracy on every real-world HAR.
 

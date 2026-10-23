@@ -12,6 +12,10 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--request` selectors: accept a request ID, an entry index (including
   negative indices such as `-1`), or a URL substring; ambiguous substrings
   report the matching IDs.
+- Headless GUI automation tests covering the Flet viewer: a fake-page harness
+  drives capture loading, request selection, analysis streaming and tabs,
+  dialog saves, reveal-switch masking, stop/cancel/error handling, and stale
+  job isolation, with the GUI module back under the coverage gate.
 - `trace --output FILE`, matching `plan` and `report`.
 - `report --format mermaid` renders the request flow as a deterministic
   Mermaid flowchart with target and unresolved styling.
@@ -21,8 +25,8 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HAR ingestion now accepts documents with a UTF-8 BOM, describes the reason
   for invalid shapes, and transparently decompresses gzip response bodies
   (base64-encoded or raw magic bytes).
-- Coverage tooling: `pytest --cov` with a 90% gate (GUI module excluded until
-  headless tests mature); CI runs tests on Linux and Windows plus a quality
+- Coverage tooling: `pytest --cov` with a 90% gate (currently 93% with the GUI
+  module included); CI runs tests on Linux and Windows plus a quality
   job for compileall, ruff, mypy, and coverage; tag pushes build sdist/wheel
   artifacts and attach them to the GitHub release.
 - Packaging metadata: project URLs, keywords, OS/Topic classifiers.

@@ -424,16 +424,6 @@ def test_analysis_cancellation_is_observed_during_extraction():
         raise AssertionError("Expected analysis cancellation")
 
 
-def test_gui_json_spans_preserve_text_and_color_syntax():
-    from reqvexa.gui import _json_spans
-
-    text = '{"key":[true,42,null,"value"]}'
-    spans = _json_spans(text)
-    assert "".join(span.text or "" for span in spans) == text
-    colors = {span.style.color for span in spans if span.style is not None}
-    assert {"#A78BFA", "#67E8F9", "#F59E0B", "#FBBF24"} <= colors
-
-
 def test_observation_stream_is_ordered_and_report_uses_value_names():
     capture = HarProvider().load_json(har([
         entry("GET", "https://example.test/source",
@@ -453,12 +443,3 @@ def test_observation_stream_is_ordered_and_report_uses_value_names():
         analysis, capture.requests[1].id
     )
     assert any(item["name"] == "session" for item in report["values"])
-
-
-def test_default_ignored_hints_are_transport_metadata_only():
-    from reqvexa.gui import DEFAULT_IGNORED_HINTS
-
-    assert "user-agent" in DEFAULT_IGNORED_HINTS
-    assert "sec-fetch-site" in DEFAULT_IGNORED_HINTS
-    assert "authorization" not in DEFAULT_IGNORED_HINTS
-    assert "cookie" not in DEFAULT_IGNORED_HINTS

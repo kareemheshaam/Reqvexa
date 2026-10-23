@@ -319,7 +319,7 @@ class ReqvexaApp:
                 selected_tile_color="#1E3A5F",
                 on_click=lambda _, request_id=request.id: self._select_request(request_id),
             ))
-        self.request_list.update()
+        self.page.update()
 
     def _select_request(self, request_id: str) -> None:
         self.target_id = request_id
@@ -336,7 +336,7 @@ class ReqvexaApp:
         self.detail_panel.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive()
         )
-        self.detail_panel.update()
+        self.page.update()
 
     def _build_ignore_options(self) -> None:
         if self.capture is None or self.target_id is None:
@@ -362,7 +362,7 @@ class ReqvexaApp:
         ]
         rows = max(1, (len(self.ignore_panel.controls) + 2) // 3)
         self.ignore_panel.height = min(8, rows) * 29 + 4
-        self.ignore_panel.update()
+        self.page.update()
 
     def _analyze(self) -> None:
         if self.capture is None or self.target_id is None:
@@ -591,7 +591,7 @@ class ReqvexaApp:
         detail.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive()
         )
-        detail.update()
+        self.page.update()
 
     def _resize_vertical_split(self, event: Any, upper: ft.Container,
                                lower: ft.Container) -> None:
