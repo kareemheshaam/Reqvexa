@@ -36,6 +36,9 @@ RED = "#FB7185"
 NAME_COLOR = "#A78BFA"
 VALUE_COLOR = "#67E8F9"
 MAX_BODY_PREVIEW_CHARS = 50_000
+# Individual streaming rows stop at this size; bigger scopes fall back to a
+# summarized counter so a 70,000-observation capture cannot flood the UI.
+MAX_OBSERVED_STREAM_ROWS = 1200
 
 # Browser transport metadata is useful for request inspection but normally is
 # not application state produced by a prior response.
@@ -82,6 +85,8 @@ class ReqvexaApp:
         self.active_job_id = 0
         self.analysis_tab_by_job: dict[int, int] = {}
         self.streaming_lists: dict[int, ft.ListView] = {}
+        self.stream_totals: dict[int, int] = {}
+        self.stream_summaries: dict[int, ft.Text] = {}
         self.latest_analysis_tab_index: int | None = None
         self.ignore_boxes: dict[str, ft.Checkbox] = {}
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -414,6 +419,8 @@ class ReqvexaApp:
         target = capture.request(target_id)
         stream = ft.ListView(expand=True, spacing=4)
         self.streaming_lists[job_id] = stream
+        self.stream_totals[job_id] = 0
+        self.stream_summaries.pop(job_id, None)
         self.analysis_tabs.tabs.append(ft.Tab(
             text=f"Analysis {self.analysis_count + 1:02d} - running",
             content=ft.Column([
@@ -446,6 +453,8 @@ class ReqvexaApp:
         self.analysis_tabs.selected_index = tab_index
         self.latest_analysis_tab_index = tab_index
         self.streaming_lists.pop(job_id, None)
+        self.stream_totals.pop(job_id, None)
+        self.stream_summaries.pop(job_id, None)
         self.analysis_tab_by_job.pop(job_id, None)
         self.page.update()
 
@@ -744,26 +753,44 @@ class ReqvexaApp:
                     if job_id == self.active_job_id:
                         stream = self.streaming_lists.get(job_id)
                         if stream is not None:
-                            for observation in observations:
-                                name = _observation_name(observation)
-                                display = SecretDisplayPolicy(
-                                    unsafe_raw=bool(self.reveal_switch.value)
-                                ).display(observation.normalized_value)
-                                stream.controls.append(ft.Container(
-                                    content=ft.Row([
-                                        ft.Text(f"{sequence:04d}", width=55, color=MUTED, size=11),
-                                        ft.Text(name, color=NAME_COLOR, size=11,
-                                                weight=ft.FontWeight.BOLD),
-                                        ft.Text(display, color=VALUE_COLOR, size=11,
-                                                selectable=True, expand=True),
-                                        ft.Text(observation.location.container, color=MUTED, size=10),
-                                    ], spacing=8),
-                                    padding=ft.padding.symmetric(horizontal=10, vertical=7),
-                                    bgcolor=SURFACE_2,
-                                    border_radius=6,
-                                ))
-                            if len(stream.controls) > 1200:
-                                del stream.controls[:-1200]
+                            total = self.stream_totals.get(job_id, 0) + len(observations)
+                            self.stream_totals[job_id] = total
+                            summary = self.stream_summaries.get(job_id)
+                            if total <= MAX_OBSERVED_STREAM_ROWS:
+                                for observation in observations:
+                                    name = _observation_name(observation)
+                                    display = SecretDisplayPolicy(
+                                        unsafe_raw=bool(self.reveal_switch.value)
+                                    ).display(observation.normalized_value)
+                                    stream.controls.append(ft.Container(
+                                        content=ft.Row([
+                                            ft.Text(f"{sequence:04d}", width=55, color=MUTED, size=11),
+                                            ft.Text(name, color=NAME_COLOR, size=11,
+                                                    weight=ft.FontWeight.BOLD),
+                                            ft.Text(display, color=VALUE_COLOR, size=11,
+                                                    selectable=True, expand=True),
+                                            ft.Text(observation.location.container, color=MUTED, size=10),
+                                        ], spacing=8),
+                                        padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                                        bgcolor=SURFACE_2,
+                                        border_radius=6,
+                                    ))
+                            else:
+                                # Flooded scope: stop building per-row controls
+                                # and keep one live counter so the UI thread
+                                # stays responsive on huge captures.
+                                if summary is None:
+                                    summary = ft.Text(
+                                        f"{MAX_OBSERVED_STREAM_ROWS:,} observations scanned",
+                                        color=MUTED, size=11, selectable=True,
+                                    )
+                                    self.stream_summaries[job_id] = summary
+                                    stream.controls = [summary]
+                                summary.value = (
+                                    f"{total:,} observations scanned"
+                                    f" (row previews capped at "
+                                    f"{MAX_OBSERVED_STREAM_ROWS:,})"
+                                )
                             dirty = True
                 elif kind == "result":
                     job_id, callback, result = payload

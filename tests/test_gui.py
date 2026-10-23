@@ -582,19 +582,28 @@ def test_observation_stream_rows_render_masked_values(app: ReqvexaApp, tmp_path)
     assert any("*" in value for value in values if value != "0007")
 
 
-def test_observation_stream_caps_at_1200_rows(app: ReqvexaApp, tmp_path):
+def test_observation_stream_switches_to_summary_when_flooded(app: ReqvexaApp, tmp_path):
     load_capture(app, write_har(tmp_path, standard_entries()))
     app._begin("Analyzing target")
     job = app.active_job_id
     app._create_streaming_analysis_tab(job, app.target_id)
 
-    flood = tuple(
+    observations = tuple(
         SimpleNamespace(semantic_hints=(f"hint.{index}",),
                         normalized_value=f"value-{index}",
                         location=SimpleNamespace(container="response.body",
                                                  path="$.field"))
-        for index in range(1300)
+        for index in range(50)
     )
-    app.events.put(("observations", (job, "unused", 1, flood)))
-    wait_for(app, lambda: len(app.streaming_lists[job].controls) == 1200)
-    assert len(app.streaming_lists[job].controls) == 1200
+    for sequence in range(29):
+        app.events.put(("observations", (job, "unused", sequence, observations)))
+    wait_for(app, lambda: app.stream_totals.get(job) == 1450)
+
+    stream = app.streaming_lists[job]
+    values = texts(stream)
+    # Row previews covered the pre-flood window; the flood itself is one
+    # summary row instead of another control chains.
+    assert any("1,450 observations scanned" in value for value in values)
+    assert any("(row previews capped at 1,200)" in value for value in values)
+    assert len(stream.controls) == 1
+    assert app.stream_summaries[job] is stream.controls[0]

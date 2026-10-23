@@ -45,6 +45,20 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bit-identical provenance output.
 - Ruff linting extended to import sorting (`I`), pyupgrade (`UP`), bugbear
   (`B`), and RUF rules; mypy moved to `disallow_untyped_defs`.
+- Planning performance: `plan_flow` scans each request's observations exactly
+  once via a worklist closure, resolves version matches for every observation
+  through one precomputed raw/stripped-string version index (a capture where
+  one logical value has ~4500 versions stalled for minutes in per-observation
+  bucket scans), skips per-flow-version trace walks that re-descended cyclic
+  producer chains, and `safe_report` reuses the target trace and pre-indexed
+  producer edge methods. On a 557-entry capture (71976 state observations,
+  4565 versions, 178 logical values) the full analyze + plan + report path
+  runs in ~3.3s instead of hanging indefinitely, with old-vs-new planning
+  byte-identical on a shared subset and trace-node collection switched to
+  version-id keys to avoid exponential dataclass hashing of shared subtrees.
+- Trace nodes are memoized analysis-wide (`trace_version`) so repeated target
+  tracing is incremental; verified byte-identical to fresh per-root walks on
+  captures where both complete.
 
 ### Removed
 
@@ -56,6 +70,11 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Cancelled analyses no longer silently skip candidate sources during
   producer inference and return degraded partial results instead of raising.
+- GUI observation streaming no longer builds a control chain per observation
+  when a scope floods: under 1,200 streamed observations rows render as
+  before; beyond the cap a single live counter replaces further rows, so a
+  71,976-observation capture no longer stalls the UI thread after the final
+  extraction tick.
 
 ## [0.1.0-alpha] - Initial release
 
