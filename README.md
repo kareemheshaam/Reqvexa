@@ -96,15 +96,17 @@ python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -e ".[dev,gui]"
 reqvexa analyze fixtures/minimal.har.json
-reqvexa trace fixtures/minimal.har.json --request REQUEST_ID
-reqvexa plan fixtures/minimal.har.json --request REQUEST_ID
-reqvexa report fixtures/minimal.har.json --request REQUEST_ID --format markdown
+reqvexa requests fixtures/minimal.har.json
+reqvexa trace fixtures/minimal.har.json --request -1
+reqvexa plan fixtures/minimal.har.json --request -1
+reqvexa report fixtures/minimal.har.json --request -1 --format markdown
 reqvexa gui fixtures/minimal.har.json
 ```
 
-The request ID can be found with the `analyze` workflow or by loading the
-capture in the GUI. Reports mask sensitive values by default. Use the
-synthetic fixture first:
+`--request` accepts a request ID, an entry index such as `-1` for the last
+request, or a URL substring. List candidates with `reqvexa requests`. Trace
+and request listings redact query strings unless `--unsafe-raw` is passed.
+Use the synthetic fixture first:
 
 ```text
 Target:
@@ -172,6 +174,7 @@ The analysis reads the capture from disk and does not make network requests.
 
 ```text
 python -m pytest -q
+python -m pytest --cov
 python -m compileall -q src tests
 python -m ruff check src tests
 python -m mypy src
@@ -195,11 +198,15 @@ fixtures for tests and examples.
 
 Implemented:
 
-- HAR parsing with preserved request order and header order.
+- HAR parsing with preserved request order and header order, tolerant of a
+  UTF-8 BOM and gzip-compressed response bodies.
+- Request discovery with `reqvexa requests`, flexible `--request` selectors,
+  masked `version`, redacted trace output, and friendly CLI errors.
 - Value extraction from headers, cookies, query/form/JSON bodies, and
   selected HTML state.
 - Raw-text matching in earlier responses, including URL/Base64/Bearer forms.
 - Temporal versions, evidence-bearing provenance, and recursive flow plans.
+- Reports in JSON, markdown, and Mermaid formats.
 - CLI and optional Flet GUI with live logs, analysis tabs, cancellation, and
   masked output.
 

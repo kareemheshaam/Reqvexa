@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -91,7 +92,7 @@ def plan_flow(analysis: Analysis, target_request_id: str) -> FlowPlan:
             request_id=request_id,
             sequence=request.sequence,
             method=request.method,
-            path=_safe_path(request.url),
+            path=safe_path(request.url),
             role=role,
             consumes=tuple(consumed),
             produces=tuple(produced),
@@ -138,7 +139,7 @@ def safe_report(analysis: Analysis, target_request_id: str,
                 "request_id": producer_request_id,
                 "sequence": producer_request.sequence,
                 "method": producer_request.method,
-                "path": _safe_path(producer_request.url),
+                "path": safe_path(producer_request.url),
                 "confidence": hypothesis.confidence,
                 "status": hypothesis.status,
                 "category": hypothesis.category.value,
@@ -166,7 +167,7 @@ def safe_report(analysis: Analysis, target_request_id: str,
             "request_id": target.id,
             "sequence": target.sequence,
             "method": target.method,
-            "path": _safe_path(target.url),
+            "path": safe_path(target.url),
         },
         "capture": {
             "requests": len(analysis.capture.requests),
@@ -286,7 +287,7 @@ def _observation_version_matches(analysis: Analysis, observation_id: str,
     observation = analysis.observations_by_id[observation_id]
     version = analysis.versions[version_id]
     return (
-        version.value_id == _value_id_for_observation(analysis, observation_id)
+        version.value_id == analysis.observation_value_ids.get(observation_id, "")
         and _values_match(version.raw_value, observation.normalized_value)
         and version.valid_from <= sequence
         and (version.valid_until is None or sequence < version.valid_until)
@@ -294,10 +295,7 @@ def _observation_version_matches(analysis: Analysis, observation_id: str,
 
 
 def _value_id_for_observation(analysis: Analysis, observation_id: str) -> str:
-    for value_id, ids in analysis.value_observation_ids.items():
-        if observation_id in ids:
-            return value_id
-    return ""
+    return analysis.observation_value_ids.get(observation_id, "")
 
 
 def _flow_version_ids(analysis: Analysis, steps: tuple[FlowStep, ...]) -> set[str]:
@@ -315,9 +313,10 @@ def _version_for_observation(analysis: Analysis, observation_id: str,
                              sequence: int) -> Any | None:
     observation = analysis.observations_by_id[observation_id]
     candidates = [
-        version for version in analysis.versions.values()
-        if version.value_id == _value_id_for_observation(analysis, observation_id)
-        and version.valid_from <= sequence
+        version for version in analysis.versions_by_value.get(
+            _value_id_for_observation(analysis, observation_id), ()
+        )
+        if version.valid_from <= sequence
         and (version.valid_until is None or sequence < version.valid_until)
         and _values_match(version.raw_value, observation.normalized_value)
     ]
@@ -346,7 +345,7 @@ def _edge_methods(analysis: Analysis, producer: str, version_id: str) -> list[st
     })
 
 
-def _safe_path(url: str) -> str:
+def safe_path(url: str) -> str:
     parts = urlsplit(url)
     path = parts.path or "/"
     safe_segments = [
@@ -354,3 +353,76 @@ def _safe_path(url: str) -> str:
         for segment in path.split("/")
     ]
     return "/".join(safe_segments)
+
+
+def _mermaid_label(text: str) -> str:
+    return text.replace("\\", "").replace('"', "#quot;").replace("\n", " ")
+
+
+def report_mermaid(report: dict[str, Any]) -> str:
+    """Render the safe report plan as a deterministic Mermaid flowchart."""
+    plan = report["plan"]
+    unresolved = set(plan["unresolved_values"])
+    assigned: dict[str, str] = {}
+    used: set[str] = set()
+    step_lines: list[str] = []
+    state_lines: list[str] = []
+    edges: list[str] = []
+    target_ids: list[str] = []
+
+    def node_id(logical_key: str) -> str:
+        if logical_key in assigned:
+            return assigned[logical_key]
+        candidate = re.sub(r"[^A-Za-z0-9_]", "_", logical_key.split(":", 1)[-1]) or "node"
+        unique: str = candidate
+        suffix = 0
+        while unique in used:
+            suffix += 1
+            unique = f"{candidate}{suffix}"
+        used.add(unique)
+        assigned[logical_key] = unique
+        return unique
+
+    for step in plan["steps"]:
+        step_node = node_id(f"step:{step['sequence']}:{step['method']}:{step['path']}")
+        label = _mermaid_label(f"{step['method']} {step['path']}")
+        if step["role"] == "target":
+            label = f"{label} (target)"
+        step_lines.append(f'    {step_node}["{label}"]')
+        if step["role"] == "target":
+            target_ids.append(step_node)
+        for value in step["produces"]:
+            value_node = node_id(f"value:{value}")
+            value_label = _mermaid_label(value)
+            state_lines.append(f'    {value_node}(("{value_label}"))')
+            edges.append(f'    {step_node} -- "{value_label}" --> {value_node}')
+        for value in step["consumes"]:
+            if value in step["produces"]:
+                continue
+            value_node = node_id(f"value:{value}")
+            value_label = _mermaid_label(value)
+            state_lines.append(f'    {value_node}(("{value_label}"))')
+            if value in unresolved:
+                edges.append(f'    {value_node} -. "unresolved {value_label}" .-> {step_node}')
+            else:
+                edges.append(f'    {value_node} -- "{value_label}" --> {step_node}')
+
+    lines: list[str] = ["flowchart LR", *step_lines,
+                        *dict.fromkeys(state_lines), *edges]
+    if target_ids:
+        lines.extend((
+            "    classDef target stroke:#22c55e,stroke-width:3px;",
+            f"    class {','.join(target_ids)} target;",
+        ))
+    unresolved_nodes = sorted({
+        node_id(f"value:{value}") for value in unresolved
+        if f"value:{value}" in assigned
+    })
+    if unresolved_nodes:
+        lines.extend((
+            "    classDef unresolved stroke:#f59e0b,stroke-dasharray:4 3;",
+            f"    class {','.join(unresolved_nodes)} unresolved;",
+        ))
+    lines.append("")
+    return "\n".join(lines)
+
