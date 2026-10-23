@@ -57,6 +57,9 @@ class Analysis:
     _versions_index: dict[str, dict[str, ValueVersion]] = field(
         default_factory=dict, repr=False
     )
+    # Trace nodes are a pure function of the version id once the analysis is
+    # built, so every trace entry point can safely share a single memo.
+    _trace_memo: dict[str, TraceNode] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """Index versions per logical value for O(1) temporal lookups."""
@@ -72,7 +75,7 @@ class Analysis:
             observation = self.observations_by_id[observation_id]
             version = self._version_for_observation(observation, request.sequence)
             if version is not None:
-                roots.append(self._trace_version(version.version_id, {}, set()))
+                roots.append(self.trace_version(version.version_id))
         unique_roots = {node.version_id: node for node in roots}
         return tuple(sorted(unique_roots.values(), key=lambda node: (node.value_id, node.version_id)))
 
@@ -126,6 +129,15 @@ class Analysis:
         active.remove(version_id)
         memo[version_id] = result
         return result
+
+    def trace_version(self, version_id: str) -> TraceNode:
+        """Trace one version through the analysis-wide memo.
+
+        Equivalent to a fresh ``_trace_version(version_id, {}, set())`` call:
+        results never depend on prior memo entries, only on immutable
+        analysis data, so the shared memo returns identical nodes.
+        """
+        return self._trace_version(version_id, self._trace_memo, set())
 
     def graph_dict(self) -> dict[str, Any]:
         return self.graph.to_dict()
