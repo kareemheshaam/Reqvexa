@@ -357,6 +357,54 @@ def test_select_request_moves_target_and_ignore_options(app: ReqvexaApp, tmp_pat
     assert len(selected) == 1 and texts(selected[0])[0] == "GET /api/products"
 
 
+def test_ignore_selections_persist_across_request_switches(app: ReqvexaApp, tmp_path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    login = app.capture.requests[0]
+    dead = app.capture.requests[2]
+
+    app._select_request(login.id)
+    assert app.ignore_boxes["user-agent"].value is True  # transport default
+    app.ignore_boxes["user-agent"].value = False
+    app._ignore_toggled(None)
+    assert app.ignored_names["user-agent"] is False
+
+    app._select_request(dead.id)
+    assert list(app.ignore_boxes) == ["x-signature"]
+    app.ignore_boxes["x-signature"].value = True
+    app._ignore_toggled(None)
+    assert app.ignored_names["x-signature"] is True
+
+    app._select_request(login.id)
+    assert app.ignore_boxes["user-agent"].value is False  # restored from storage
+
+    merged = app._ignored_selection()
+    assert "x-signature" in merged
+    assert "user-agent" not in merged
+
+
+def test_ignore_options_include_response_side_names(app: ReqvexaApp, tmp_path):
+    entries = standard_entries()
+    login = entries[0]
+    assert login["response"] is not None
+    login["response"]["headers"].append({"name": "X-Frame-Options", "value": "deny"})
+    load_capture(app, write_har(tmp_path, entries))
+    app._select_request(app.capture.requests[0].id)
+    assert "user-agent" in app.ignore_boxes  # request side, unchanged
+    assert "x-frame-options" in app.ignore_boxes  # response side selectable
+    assert app.ignore_boxes["x-frame-options"].value is False  # opt-in, not a default
+    assert "set-cookie" not in app.ignore_boxes  # zombie name, cookie names instead
+
+
+def test_ignore_options_list_persisted_names_from_other_requests(
+        app: ReqvexaApp, tmp_path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    app.ignored_names.clear()  # isolate persistence from transport defaults
+    app.ignored_names["x-signature"] = True
+    app._select_request(app.capture.requests[0].id)
+    assert has_text(app.ignore_panel, "Also ignoring (1 from other requests)")
+    assert has_text(app.ignore_panel, "x-signature")
+
+
 def test_search_field_filters_request_list(app: ReqvexaApp, tmp_path):
     load_capture(app, write_har(tmp_path, standard_entries()))
     app.search_field.value = "api"

@@ -89,6 +89,11 @@ class ReqvexaApp:
         self.stream_summaries: dict[int, ft.Text] = {}
         self.latest_analysis_tab_index: int | None = None
         self.ignore_boxes: dict[str, ft.Checkbox] = {}
+        # Ignore selections persist across target switches so a value chosen
+        # on one request stays ignored for the capture and later requests.
+        self.ignored_names: dict[str, bool] = {
+            hint: True for hint in DEFAULT_IGNORED_HINTS
+        }
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.cancel_event = threading.Event()
         self.traffic_detail_container: ft.Container
@@ -346,39 +351,64 @@ class ReqvexaApp:
     def _build_ignore_options(self) -> None:
         if self.capture is None or self.target_id is None:
             return
-        hints = _request_hints(self.capture.request(self.target_id))
+        request = self.capture.request(self.target_id)
+        response = _response_for(self.capture.responses, request.response_id)
+        hints = _request_hints(request, response)
         self.ignore_boxes = {
             hint: ft.Checkbox(
                 label=hint,
-                value=hint in DEFAULT_IGNORED_HINTS,
+                value=self.ignored_names.get(hint, hint in DEFAULT_IGNORED_HINTS),
+                on_change=self._ignore_toggled,
             )
-            for hint in hints[:80]
+            for hint in hints[:200]
         }
-        self.ignore_panel.controls = [
-            ft.Container(
-                content=checkbox,
-                height=28,
-                padding=0,
-                alignment=ft.Alignment(0, 0),
-            )
-            for checkbox in self.ignore_boxes.values()
-        ] or [
-            ft.Text("No named state values detected.", color=MUTED, size=12)
+        persistent_only = [
+            name for name, checked in sorted(self.ignored_names.items())
+            if checked and name not in self.ignore_boxes
         ]
-        rows = max(1, (len(self.ignore_panel.controls) + 2) // 3)
-        self.ignore_panel.height = min(8, rows) * 29 + 4
+        self.ignore_panel.controls = [
+                ft.Container(
+                    content=checkbox,
+                    height=28,
+                    padding=0,
+                    alignment=ft.Alignment(0, 0),
+                )
+                for checkbox in self.ignore_boxes.values()
+            ] or [
+                ft.Text("No named state values detected.", color=MUTED, size=12)
+            ]
+        if persistent_only:
+            self.ignore_panel.controls.append(ft.Text(
+                f"Also ignoring ({len(persistent_only)} from other requests): "
+                + ", ".join(persistent_only[:12]),
+                color=MUTED, size=11,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ))
+        rows = max(1, (len(self.ignore_boxes) + 2) // 3)
+        self.ignore_panel.height = min(8, rows) * 29 + 4 + (16 if persistent_only else 0)
         self.page.update()
+
+    def _ignore_toggled(self, event: ft.ControlEvent | None) -> None:
+        """Persist every visible checkbox state (survives target switches)."""
+        for hint, checkbox in self.ignore_boxes.items():
+            self.ignored_names[hint] = bool(checkbox.value)
+
+    def _ignored_selection(self) -> set[str]:
+        """Every ignored name: current panel checks plus persisted ones."""
+        self._ignore_toggled(None)
+        return {name for name, checked in self.ignored_names.items() if checked}
 
     def _analyze(self) -> None:
         if self.capture is None or self.target_id is None:
             self._notify("Load a capture and select a target request.", RED)
             return
-        ignored = {hint for hint, checkbox in self.ignore_boxes.items() if checkbox.value}
+        ignored = self._ignored_selection()
         job_id = self._begin("Analyzing target")
         self._create_streaming_analysis_tab(job_id, self.target_id)
         self._run_worker(
             lambda: ProvenanceEngine().analyze(
                 self.capture, target_request_id=self.target_id, ignored_hints=ignored,
+                ignored_value_names=ignored,
                 progress_callback=lambda stage, current, total, message:
                     self._progress(job_id, stage, current, total, message),
                 observation_callback=lambda request_id, sequence, observations:
@@ -1012,7 +1042,7 @@ def _key_value_section(title: str, items: list[tuple[str, str]]) -> ft.Control:
     ], spacing=4)
 
 
-def _request_hints(request: HttpRequest) -> list[str]:
+def _request_hints(request: HttpRequest, response: HttpResponse | None = None) -> list[str]:
     hints = {header.name.lower() for header in request.headers}
     hints.update(cookie.name.lower() for cookie in request.cookies)
     hints.update(key.lower() for key, _ in request.query)
@@ -1022,6 +1052,15 @@ def _request_hints(request: HttpRequest) -> list[str]:
             hints.update(_json_keys(parsed))
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
+    if response is not None:
+        # Response-side names so server-set values (headers, Set-Cookie) can
+        # be selected for capture-wide ignoring as well. The Set-Cookie
+        # header name itself is skipped: parsed cookie names below are the
+        # selectable value identities, and checking the raw header name
+        # would silently drop every server-set cookie at once.
+        hints.update(header.name.lower() for header in response.headers
+                     if header.name.lower() != "set-cookie")
+        hints.update(cookie.name.lower() for cookie in response.cookies)
     return sorted(hints)
 
 

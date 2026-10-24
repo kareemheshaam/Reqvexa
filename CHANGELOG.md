@@ -30,6 +30,16 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   job for compileall, ruff, mypy, and coverage; tag pushes build sdist/wheel
   artifacts and attach them to the GitHub release.
 - Packaging metadata: project URLs, keywords, OS/Topic classifiers.
+- Capture-wide value ignoring: `ProvenanceEngine.analyze` accepts
+  `ignored_value_names`, which drops whole logical-value buckets whose
+  canonical name forms (request keys, `X-*` response headers, cookie./
+  CSRF/Bearer aliases) match a checked name, so a value selected on one
+  request can no longer reappear under a different name shape elsewhere.
+  The GUI ignore panel now also lists the target response's header and
+  Set-Cookie names (the raw Set-Cookie header name is skipped, parsed
+  cookie names are selectable instead), selections persist across request
+  switches, and persisted picks from other requests surface in an "Also
+  ignoring (N from other requests)" footer line.
 
 ### Changed
 

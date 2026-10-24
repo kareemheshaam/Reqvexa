@@ -402,6 +402,51 @@ def test_analysis_can_ignore_named_values():
     assert not any(version.raw_value == "B" for version in analysis.versions.values())
 
 
+def test_ignored_value_names_drop_one_value_capture_wide():
+    capture = HarProvider().load_json(har([
+        entry("GET", "https://example.test/source",
+              response=response(headers=[
+                  {"name": "X-Li-Fabric", "value": "dfab"},
+                  {"name": "Set-Cookie", "value": "session=keepme"},
+              ])),
+        entry("GET", "https://example.test/target",
+              headers=[
+                  {"name": "X-Li-Fabric", "value": "dfab"},
+                  {"name": "Cookie", "value": "session=keepme"},
+              ],
+              response=response(headers=[{"name": "X-Li-Fabric", "value": "dfab"}])),
+    ]))
+    target = capture.requests[1]
+    engine = ProvenanceEngine()
+
+    baseline = engine.analyze(capture, target_request_id=target.id)
+    assert any(version.raw_value == "dfab" for version in baseline.versions.values())
+
+    analysis = engine.analyze(
+        capture, target_request_id=target.id, ignored_value_names={"x-li-fabric"},
+    )
+    assert not any(version.raw_value == "dfab" for version in analysis.versions.values())
+    assert any(version.raw_value == "keepme" for version in analysis.versions.values())
+
+
+def test_ignored_value_names_match_canonical_aliases():
+    capture = HarProvider().load_json(har([
+        entry("GET", "https://example.test/source",
+              response=response(headers=[
+                  {"name": "Set-Cookie", "value": "csrf_token=alias"},
+                  {"name": "Set-Cookie", "value": "session=keepme"},
+              ])),
+        entry("GET", "https://example.test/target",
+              headers=[{"name": "Cookie", "value": "csrf_token=alias; session=keepme"}]),
+    ]))
+    target = capture.requests[1]
+    analysis = ProvenanceEngine().analyze(
+        capture, target_request_id=target.id, ignored_value_names={"csrf"},
+    )
+    assert not any(version.raw_value == "alias" for version in analysis.versions.values())
+    assert any(version.raw_value == "keepme" for version in analysis.versions.values())
+
+
 def test_analysis_cancellation_is_observed_during_extraction():
     capture = HarProvider().load_json(har([
         entry("GET", f"https://example.test/{index}",

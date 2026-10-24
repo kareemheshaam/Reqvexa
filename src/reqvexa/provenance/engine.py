@@ -146,6 +146,7 @@ class Analysis:
 class ProvenanceEngine:
     def analyze(self, capture: Capture, target_request_id: str | None = None,
                 ignored_hints: set[str] | None = None,
+                ignored_value_names: set[str] | None = None,
                 progress_callback: Callable[[str, int, int, str], None] | None = None,
                 cancel_event: Any | None = None,
                 observation_callback: Callable[[str, int, tuple[ValueObservation, ...]], None]
@@ -176,6 +177,12 @@ class ProvenanceEngine:
                 item for item in all_observations
                 if not _ignored_observation(item, ignored)
             )
+        ignored_values = {
+            str(item).lower().strip() for item in (ignored_value_names or set())
+            if str(item).strip()
+        }
+        if ignored_values:
+            all_observations = _drop_named_values(all_observations, ignored_values)
         response_by_request = {response.request_id: response for response in capture.responses}
         body_texts: dict[str, str] = {}
         emit("scope", 1, 4, f"Collected {len(all_observations)} observations")
@@ -658,6 +665,41 @@ def _ignored_observation(observation: ValueObservation, ignored: set[str]) -> bo
         hint.removeprefix("cookie.") for hint in hints if hint.startswith("cookie.")
     }
     return bool(expanded_hints & ignored) or path_leaf in ignored
+
+
+def _drop_named_values(observations: tuple[ValueObservation, ...],
+                       ignored_values: set[str]) -> tuple[ValueObservation, ...]:
+    """Remove whole logical values whose name forms match an ignore set.
+
+    One value can surface under different raw names at different locations
+    (request-side keys, response headers such as ``X-*``, or canonical
+    semantic hints), so observation-level name matching would ignore it at
+    some requests and keep it at others. Both the bucket names and the
+    ignored names are therefore canonicalized; any single-form match drops
+    the value capture-wide, whatever name its observations carry.
+    """
+    checked = {_canonical_hint(item) for item in ignored_values if item}
+    if not checked:
+        return observations
+    structural_by_observation_id: dict[str, str] = {}
+    names_by_structural: dict[str, set[str]] = {}
+    for observation in observations:
+        structural_id = _logical_value_id(observation)
+        structural_by_observation_id[observation.observation_id] = structural_id
+        names = names_by_structural.setdefault(structural_id, set())
+        names.update(_canonical_hint(hint) for hint in observation.semantic_hints)
+        leaf = (observation.location.path or "").rsplit(".", 1)[-1]
+        names.add(_canonical_hint(leaf))
+    dropped = {
+        structural_id for structural_id, names in names_by_structural.items()
+        if names & checked
+    }
+    if not dropped:
+        return observations
+    return tuple(
+        item for item in observations
+        if structural_by_observation_id[item.observation_id] not in dropped
+    )
 
 
 def _canonical_hint(hint: str) -> str:
