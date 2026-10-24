@@ -395,6 +395,21 @@ def test_ignore_options_include_response_side_names(app: ReqvexaApp, tmp_path):
     assert "set-cookie" not in app.ignore_boxes  # zombie name, cookie names instead
 
 
+def test_loaded_capture_keeps_metadata_only_proxies(app: ReqvexaApp, tmp_path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    assert app.capture.is_lazy
+    assert app.capture.requests[0].headers == ()  # resident proxies hold none
+
+    app._select_request(app.capture.requests[0].id)
+    assert list(app.ignore_boxes) == ["user-agent"]  # full view hints
+    assert has_text(app.detail_panel, "User-Agent")  # parsed on demand for view
+    assert app.capture.requests[0].headers == ()  # proxies stay metadata-only
+
+    run_analysis(app)
+    assert len(app.analysis_tabs.tabs) == 1
+    assert app.capture.requests[0].headers == ()  # engine released after analyze
+
+
 def test_ignore_options_list_persisted_names_from_other_requests(
         app: ReqvexaApp, tmp_path):
     load_capture(app, write_har(tmp_path, standard_entries()))

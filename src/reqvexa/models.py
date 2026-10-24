@@ -5,7 +5,10 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from reqvexa.capture.har import LazyEntryStore
 
 
 class OriginType(StrEnum):
@@ -121,15 +124,60 @@ class Capture:
     requests_by_id: dict[str, HttpRequest] = field(
         default_factory=dict, repr=False, compare=False
     )
+    entry_store: LazyEntryStore | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "requests_by_id", {request.id: request for request in self.requests})
+
+    @property
+    def is_lazy(self) -> bool:
+        """A lazy capture keeps only metadata resident and re-reads entry
+        content from disk on demand."""
+        return self.entry_store is not None
 
     def request(self, request_id: str) -> HttpRequest:
         found = self.requests_by_id.get(request_id)
         if found is None:
             raise KeyError(f"Unknown request: {request_id}")
         return found
+
+    def view_entry(self, request_id: str) -> tuple[HttpRequest, HttpResponse | None]:
+        """Full request/response for inspection, parsed from source on demand.
+
+        Lazy captures parse the single entry from the file when called; eager
+        captures return the already resident objects. Only provenance analysis
+        needs the whole capture at once; it materializes and then releases.
+        """
+        if self.entry_store is None:
+            request = self.request(request_id)
+            response = next(
+                (item for item in self.responses if item.id == request.response_id), None
+            )
+            return request, response
+        return self.entry_store.view(request_id)
+
+    def materialize_all(self) -> None:
+        """Parse every entry from source and install the full content."""
+        if self.entry_store is None or self.entry_store.materialized:
+            return
+        requests, responses = self.entry_store.materialize_capture()
+        self._install(tuple(requests), tuple(responses))
+        self.entry_store.materialized = True
+
+    def dematerialize(self) -> None:
+        """Return every request/response to its metadata-only proxy."""
+        if self.entry_store is None or not self.entry_store.materialized:
+            return
+        self._install(*self.entry_store.proxies)
+        self.entry_store.materialized = False
+
+    def _install(self, requests: tuple[HttpRequest, ...],
+                 responses: tuple[HttpResponse, ...]) -> None:
+        object.__setattr__(self, "requests", requests)
+        object.__setattr__(self, "responses", responses)
+        object.__setattr__(self, "requests_by_id", {one.id: one for one in requests})
 
 
 @dataclass(frozen=True)

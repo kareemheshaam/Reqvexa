@@ -160,6 +160,11 @@ class ProvenanceEngine:
                 progress_callback(stage, current, total, message)
 
         emit("start", 0, 1, "Starting analysis")
+        capture_is_lazy = capture.is_lazy
+        if capture_is_lazy:
+            # Provenance needs every entry's content; a lazy capture pulls it
+            # from the file for the duration and releases it again below.
+            capture.materialize_all()
         target_sequence = (
             capture.request(target_request_id).sequence
             if target_request_id is not None else None
@@ -247,6 +252,8 @@ class ProvenanceEngine:
         )
         self._add_edges(graph, capture, observations, versions, producers, negative, cancel_event)
         emit("complete", 4, 4, "Analysis complete")
+        if capture_is_lazy:
+            capture.dematerialize()
         return Analysis(capture, observations, graph, versions, by_id, request_ids,
                         {key: tuple(value) for key, value in value_obs.items()},
                         producers, negative, logical_values,

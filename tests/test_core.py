@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 
+import pytest
+
 from reqvexa.cancellation import AnalysisCancelled
-from reqvexa.capture import HarProvider
+from reqvexa.capture import HarFormatError, HarProvider
 from reqvexa.extraction import extract_observations
 from reqvexa.models import EdgeType, Graph, Node, NodeType, SecretDisplayPolicy
 from reqvexa.planning import plan_flow, report_markdown, safe_report
@@ -402,6 +404,70 @@ def test_analysis_can_ignore_named_values():
     assert not any(version.raw_value == "B" for version in analysis.versions.values())
 
 
+def _lazy_fixture_document() -> dict:
+    """Unicode-heavy flow: two responses, one entry without a response."""
+    return har([
+        entry("GET", "https://example.test/source?q=Wörterbuch",
+              response=response(headers=[
+                  {"name": "Set-Cookie", "value": "session=Münze-Value"},
+                  {"name": "Content-Type", "value": "application/json"},
+              ], text='{"csrf":"t0ken-é"}')),
+        entry("POST", "https://example.test/target",
+              post_data={"mimeType": "application/json", "text": '{"payload":"ü€"}'},
+              headers=[{"name": "Cookie", "value": "session=Münze-Value"}],
+              response=response(headers=[{"name": "X-Frame-Options", "value": "deny"}],
+                                text="ok")),
+        entry("GET", "https://example.test/bare"),
+    ])
+
+
+def _write_lazy_fixture(tmp_path, name="unicode.har") -> object:
+    path = tmp_path / name
+    path.write_text(json.dumps(_lazy_fixture_document()), encoding="utf-8")
+    return path
+
+
+def test_lazy_capture_metadata_matches_eager_loading(tmp_path):
+    eager = HarProvider().load_json(_lazy_fixture_document())
+    lazy = HarProvider().load_file(_write_lazy_fixture(tmp_path), lazy=True)
+
+    assert lazy.entry_store is not None
+    assert [request.id for request in lazy.requests] == [
+        request.id for request in eager.requests]
+    assert [request.method for request in lazy.requests] == [
+        request.method for request in eager.requests]
+    assert [request.url for request in lazy.requests] == [
+        request.url for request in eager.requests]
+    assert [request.sequence for request in lazy.requests] == [
+        request.sequence for request in eager.requests]
+    assert [request.response_id for request in lazy.requests] == [
+        request.response_id for request in eager.requests]
+    assert [value.id for value in lazy.responses] == [
+        value.id for value in eager.responses]
+    assert [value.status for value in lazy.responses] == [
+        value.status for value in eager.responses]
+    for request in lazy.requests:
+        assert request.headers == ()
+        assert request.cookies == ()
+        assert request.body is None
+    for value in lazy.responses:
+        assert value.headers == ()
+        assert value.body is None
+
+
+def test_lazy_capture_views_full_entry_on_demand(tmp_path):
+    eager = HarProvider().load_json(_lazy_fixture_document())
+    lazy = HarProvider().load_file(_write_lazy_fixture(tmp_path), lazy=True)
+
+    request, value = lazy.view_entry(lazy.requests[1].id)
+    assert request == eager.requests[1]
+    assert value == eager.responses[1]
+    # repeat views return equivalent (cached) content
+    assert lazy.view_entry(lazy.requests[1].id) == (request, value)
+    # viewing one entry does not materialize the resident proxies
+    assert lazy.requests[1].body is None
+
+
 def test_ignored_value_names_drop_one_value_capture_wide():
     capture = HarProvider().load_json(har([
         entry("GET", "https://example.test/source",
@@ -445,6 +511,79 @@ def test_ignored_value_names_match_canonical_aliases():
     )
     assert not any(version.raw_value == "alias" for version in analysis.versions.values())
     assert any(version.raw_value == "keepme" for version in analysis.versions.values())
+
+
+def test_lazy_capture_dematerializes_after_full_load(tmp_path):
+    eager = HarProvider().load_json(_lazy_fixture_document())
+    lazy = HarProvider().load_file(_write_lazy_fixture(tmp_path), lazy=True)
+
+    assert lazy.entry_store.materialized is False
+    lazy.materialize_all()
+    assert lazy.entry_store.materialized is True
+    assert lazy.requests[1] == eager.requests[1]
+    assert lazy.responses[0] == eager.responses[0]
+
+    lazy.dematerialize()
+    assert lazy.entry_store.materialized is False
+    assert lazy.requests[1].body is None
+    request, _ = lazy.view_entry(lazy.requests[0].id)
+    assert request == eager.requests[0]
+
+
+def test_lazy_capture_engine_analysis_matches_eager(tmp_path):
+    eager = HarProvider().load_json(_lazy_fixture_document())
+    lazy = HarProvider().load_file(_write_lazy_fixture(tmp_path), lazy=True)
+    target = eager.requests[1]
+
+    eager_analysis = ProvenanceEngine().analyze(eager, target_request_id=target.id)
+    lazy_analysis = ProvenanceEngine().analyze(
+        lazy, target_request_id=lazy.requests[1].id
+    )
+
+    def version_shapes(analysis):
+        return tuple(sorted(
+            (version.version_id, version.value_digest, version.valid_from,
+             version.valid_until)
+            for version in analysis.versions.values()
+        ))
+
+    assert len(lazy_analysis.observations) == len(eager_analysis.observations)
+    assert version_shapes(lazy_analysis) == version_shapes(eager_analysis)
+    assert len(lazy_analysis.logical_values) == len(eager_analysis.logical_values)
+    # the engine released the materialized content after finishing
+    assert lazy.requests[0].headers == ()
+
+
+def test_lazy_capture_rejects_invalid_files(tmp_path):
+    newer = tmp_path / "newer.har"
+    newer.write_text('{"log":{"version":"2.0","entries":[]}}', encoding="utf-8")
+    with pytest.raises(HarFormatError, match=r"Only HAR 1\.2 is supported"):
+        HarProvider().load_file(newer, lazy=True)
+
+    malformed = tmp_path / "malformed.har"
+    malformed.write_text('{"log":{"version":"1.2","entries":{"a":1}}}', encoding="utf-8")
+    with pytest.raises(HarFormatError, match=r"log\.entries must be a list"):
+        HarProvider().load_file(malformed, lazy=True)
+
+    broken = tmp_path / "broken.har"
+    broken.write_text('{"log":{"version":"1.2","entries":[{?}]}}', encoding="utf-8")
+    with pytest.raises(HarFormatError, match="is not valid UTF-8 JSON"):
+        HarProvider().load_file(broken, lazy=True)
+
+    missing = tmp_path / "missing.har"
+    missing.write_text('{"log":{"version":"1.2","entries":[{}]}}', encoding="utf-8")
+    with pytest.raises(HarFormatError, match="Entry 0 has no request object"):
+        HarProvider().load_file(missing, lazy=True)
+
+    structure = tmp_path / "structure.har"
+    structure.write_text('{"log":{"version":"1.2","entries":[1]}}', encoding="utf-8")
+    with pytest.raises(HarFormatError, match="invalid entry structure"):
+        HarProvider().load_file(structure, lazy=True)
+
+    empty = tmp_path / "empty.har"
+    empty.write_text('{"log":{"version":"1.2","entries":[]}}', encoding="utf-8")
+    empty_lazy = HarProvider().load_file(empty, lazy=True)
+    assert empty_lazy.requests == () and empty_lazy.responses == ()
 
 
 def test_analysis_cancellation_is_observed_during_extraction():

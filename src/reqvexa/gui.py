@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import flet as ft
 
 from reqvexa.cancellation import AnalysisCancelled
-from reqvexa.capture import HarProvider
+from reqvexa.capture import HarFormatError, HarProvider
 from reqvexa.models import (
     Capture,
     HttpRequest,
@@ -288,7 +288,9 @@ class ReqvexaApp:
             self._notify("Choose a HAR file first.", RED)
             return
         job_id = self._begin("Loading capture")
-        self._run_worker(lambda: HarProvider().load_file(path), self._capture_loaded, job_id)
+        self._run_worker(
+            lambda: HarProvider().load_file(path, lazy=True), self._capture_loaded, job_id
+        )
 
     def _capture_loaded(self, capture: Any) -> None:
         self.capture = capture
@@ -338,11 +340,26 @@ class ReqvexaApp:
         self._render_request_list()
         self.page.update()
 
-    def _show_request(self, request_id: str) -> None:
+    def _view_entry(self, request_id: str) -> tuple[HttpRequest, HttpResponse | None] | None:
+        """Parse one entry for viewing; survives unreadable source files."""
         if self.capture is None:
+            return None
+        try:
+            return self.capture.view_entry(request_id)
+        except (HarFormatError, OSError) as error:
+            self._notify(f"Cannot load entry content: {error}", RED)
+            return None
+
+    def _show_request(self, request_id: str) -> None:
+        pair = self._view_entry(request_id)
+        if pair is None:
+            self.detail_panel.content = ft.Text(
+                "This entry's content could not be re-read from the capture file.",
+                color=RED,
+            )
+            self.page.update()
             return
-        request = self.capture.request(request_id)
-        response = _response_for(self.capture.responses, request.response_id)
+        request, response = pair
         self.detail_panel.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive()
         )
@@ -351,8 +368,10 @@ class ReqvexaApp:
     def _build_ignore_options(self) -> None:
         if self.capture is None or self.target_id is None:
             return
-        request = self.capture.request(self.target_id)
-        response = _response_for(self.capture.responses, request.response_id)
+        pair = self._view_entry(self.target_id)
+        if pair is None:
+            return
+        request, response = pair
         hints = _request_hints(request, response)
         self.ignore_boxes = {
             hint: ft.Checkbox(
@@ -623,10 +642,15 @@ class ReqvexaApp:
         ], expand=True, spacing=0)
 
     def _show_analysis_request(self, detail: ft.Container, request_id: str) -> None:
-        if self.capture is None:
+        pair = self._view_entry(request_id)
+        if pair is None:
+            detail.content = ft.Text(
+                "This entry's content could not be re-read from the capture file.",
+                color=RED,
+            )
+            self.page.update()
             return
-        request = self.capture.request(request_id)
-        response = _response_for(self.capture.responses, request.response_id)
+        request, response = pair
         detail.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive()
         )
@@ -831,12 +855,18 @@ class ReqvexaApp:
                     if payload == self.active_job_id:
                         self._finish("Analysis stopped")
                         self._log("Analysis stopped by user.", AMBER)
+                        # A stopped lazy analysis leaves its materialized
+                        # content behind; release it so idle memory stays low.
+                        if self.capture is not None:
+                            self.capture.dematerialize()
                         dirty = True
                 elif kind == "error":
                     job_id, error = payload
                     if job_id == self.active_job_id:
                         self._finish("Operation failed")
                         self._notify(str(error), RED)
+                        if self.capture is not None:
+                            self.capture.dematerialize()
                         dirty = True
                 handled += 1
                 if handled >= 25:

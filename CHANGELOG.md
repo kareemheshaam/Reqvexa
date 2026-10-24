@@ -32,14 +32,26 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Packaging metadata: project URLs, keywords, OS/Topic classifiers.
 - Capture-wide value ignoring: `ProvenanceEngine.analyze` accepts
   `ignored_value_names`, which drops whole logical-value buckets whose
-  canonical name forms (request keys, `X-*` response headers, cookie./
-  CSRF/Bearer aliases) match a checked name, so a value selected on one
-  request can no longer reappear under a different name shape elsewhere.
-  The GUI ignore panel now also lists the target response's header and
-  Set-Cookie names (the raw Set-Cookie header name is skipped, parsed
-  cookie names are selectable instead), selections persist across request
-  switches, and persisted picks from other requests surface in an "Also
-  ignoring (N from other requests)" footer line.
+  canonical name forms (request keys, `X-*` response headers,
+  cookie./CSRF/Bearer aliases) match a checked name, so a value selected
+  on one request can no longer reappear under a different name shape
+  elsewhere. The GUI ignore panel now also lists the target response's
+  header and Set-Cookie names (the raw Set-Cookie header name is skipped,
+  parsed cookie names are selectable instead), selections persist across
+  request switches, and persisted picks from other requests surface in an
+  "Also ignoring (N from other requests)" footer line.
+- Lazy HAR loading in the GUI: a file load builds a byte-offset index
+  over `log.entries` and keeps only request/response metadata resident
+  (methods, URLs, statuses beside the request list); the full content of
+  one entry is parsed from the file when it is selected in the traffic or
+  analysis-flow list, with a bounded LRU re-parse cache. Provenance
+  analysis materializes the whole capture for the run and releases it
+  afterwards, including on failure or cancel. Byte offsets are exact with
+  BOMs and multi-byte characters; invalid files and source files changed
+  mid-session surface as notifications instead of crashes. On the
+  557-entry reference capture the idle resident footprint drops from
+  ~98 MB to ~28 MB before analysis and the engine finds identical results
+  (178 logical values) either way.
 
 ### Changed
 
