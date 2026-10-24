@@ -26,6 +26,7 @@ import pytest
 from reqvexa.gui import (
     AMBER,
     DEFAULT_IGNORED_HINTS,
+    MANUAL_TAB_INDEX,
     RED,
     ReqvexaApp,
     _badge,
@@ -325,13 +326,17 @@ def test_default_ignored_hints_are_transport_metadata_only():
 
 def test_app_builds_expected_initial_layout(app: ReqvexaApp, page: FakePage):
     assert len(page.controls) == 3
-    assert [tab.text for tab in app.main_tabs.tabs] == ["Traffic", "Logs", "Analysis"]
+    assert [tab.text for tab in app.main_tabs.tabs] == [
+        "Traffic", "Manual", "Logs", "Analysis"]
     assert app.analysis_tabs.tabs == []
     assert app.request_list.controls == []
     assert app.stop_button.disabled is True
     assert app.progress.visible is False
     assert app.status_text.value == "Ready"
     assert has_text(app.detail_panel, "Select a request to inspect it.")
+    # The manual tab starts empty with its guidance placeholder.
+    assert app.manual_flow_list.controls == []
+    assert has_text(app.manual_detail, "Pick a request in Traffic")
 
     event = SimpleNamespace(control=SimpleNamespace(value=45))
     app._resize_vertical_split(event, app.traffic_list_container,
@@ -740,10 +745,10 @@ def test_manual_trace_finds_first_request_holding_the_value(app: ReqvexaApp,
     assert hop.from_request.id == products.id
     assert hop.found_request is not None and hop.found_request.sequence == 0
     assert "response body field 'csrf'" in hop.locations
-    assert app.manual_strip.visible
-    assert len(app.manual_cards.controls) == 2  # origin card + one hop
-    # The found request opened in the inspector for the next value pick.
-    assert has_text(app.detail_panel, "/login")
+    assert len(app.manual_flow_list.controls) == 2  # origin card + one hop
+    # The hop surfaced the Manual tab and opened the found request there.
+    assert app.main_tabs.selected_index == MANUAL_TAB_INDEX
+    assert has_text(app.manual_detail, "/login")
     run_poll(app, 0.25)  # one hop per click: nothing searched further
     assert len(app.manual_hops) == 1
 
@@ -760,8 +765,10 @@ def test_manual_trace_dead_end_reports_no_earlier_appearance(app: ReqvexaApp,
     hop = app.manual_hops[0]
     assert hop.found_request is None and not hop.locations
     assert "first appearance is request #0" in app.status_text.value
-    assert any("no earlier appearance" in value for value in texts(app.manual_strip))
-    assert has_text(app.detail_panel, "/login")  # inspector unchanged on dead end
+    assert any("no earlier appearance" in value for value in texts(app.manual_flow_list))
+    # No auto-open on a dead end: the manual inspector keeps its placeholder.
+    assert has_text(app.manual_detail, "Pick a request in Traffic")
+    assert has_text(app.detail_panel, "/login")  # traffic inspector unchanged
 
 
 def test_manual_trace_ignores_names_and_hits_first_appearance_first(app: ReqvexaApp,
@@ -791,18 +798,18 @@ def test_manual_trace_ignores_names_and_hits_first_appearance_first(app: Reqvexa
     assert second.locations == ("request body field 'csrf_token'",)
 
 
-def test_manual_strip_masks_values_until_revealed(app: ReqvexaApp, tmp_path: Path):
+def test_manual_flow_masks_values_until_revealed(app: ReqvexaApp, tmp_path: Path):
     load_capture(app, write_har(tmp_path, standard_entries()))
     products = app.capture.requests[1]
     app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
     wait_for(app, lambda: len(app.manual_hops) == 1)
 
-    shown = texts(app.manual_strip)
+    shown = texts(app.manual_flow_list)
     assert not any(TOKEN in value for value in shown)  # masked by default
     assert any(value.count("*") == 16 for value in shown)
     app.reveal_switch.value = True
     app._refresh_sensitive_views()
-    assert any(TOKEN in value for value in texts(app.manual_strip))
+    assert any(TOKEN in value for value in texts(app.manual_flow_list))
 
 
 def test_manual_trace_clear_and_capture_reload_reset(app: ReqvexaApp,
@@ -814,7 +821,8 @@ def test_manual_trace_clear_and_capture_reload_reset(app: ReqvexaApp,
 
     app._clear_manual_trace()
     assert len(app.manual_hops) == 0 and app.manual_origin is None
-    assert not app.manual_strip.visible
+    assert len(app.manual_flow_list.controls) == 0
+    assert has_text(app.manual_detail, "Pick a request in Traffic")
 
     app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
     wait_for(app, lambda: len(app.manual_hops) == 1)
@@ -822,7 +830,8 @@ def test_manual_trace_clear_and_capture_reload_reset(app: ReqvexaApp,
     second.write_text(json.dumps(har(standard_entries())), encoding="utf-8")
     load_capture(app, str(second))
     assert len(app.manual_hops) == 0 and app.manual_origin is None
-    assert not app.manual_strip.visible
+    assert len(app.manual_flow_list.controls) == 0
+    assert has_text(app.manual_detail, "Pick a request in Traffic")
 
 
 def test_manual_trace_rejects_values_too_short(app: ReqvexaApp, tmp_path: Path):
@@ -831,4 +840,4 @@ def test_manual_trace_rejects_values_too_short(app: ReqvexaApp, tmp_path: Path):
     app._trace_inspector_value(kit.id, "header", "x-short", "9")
     run_poll(app, 0.2)
     assert len(app.manual_hops) == 0
-    assert not app.manual_strip.visible
+    assert len(app.manual_flow_list.controls) == 0

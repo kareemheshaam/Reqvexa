@@ -45,6 +45,9 @@ MAX_BODY_PREVIEW_CHARS = 50_000
 BODY_HIGHLIGHT_MAX_CHARS = 500_000
 # Short values match practically everything, so manual tracing refuses them.
 MANUAL_VALUE_MIN_CHARS = 2
+# Main-tab order in ReqvexaApp._build: Traffic, Manual, Logs, Analysis.
+MANUAL_TAB_INDEX = 1
+ANALYSIS_TAB_INDEX = 3
 
 # (request_id, kind, name, exact raw value) from an inspector value click.
 ValueClickHandler = Callable[[str, str, str, str], None]
@@ -120,8 +123,9 @@ class ReqvexaApp:
         # the user has recorded (one hop per value click, no automations).
         self.manual_hops: list[ManualHop] = []
         self.manual_origin: HttpRequest | None = None
-        self.manual_strip: ft.Container
-        self.manual_cards: ft.Row
+        self.manual_open_id: str | None = None
+        self.manual_flow_list: ft.ListView
+        self.manual_detail: ft.Container
         # Ignore selections persist across target switches so a value chosen
         # on one request stays ignored for the capture and later requests.
         self.ignored_names: dict[str, bool] = {
@@ -216,6 +220,7 @@ class ReqvexaApp:
         self.main_tabs = ft.Tabs(
             tabs=[
                 ft.Tab(text="Traffic", content=self._traffic_view()),
+                ft.Tab(text="Manual", content=self._manual_view()),
                 ft.Tab(text="Logs", content=self.live_log),
                 ft.Tab(text="Analysis", content=self._analysis_view()),
             ],
@@ -266,25 +271,6 @@ class ReqvexaApp:
             padding=ft.padding.all(14),
             bgcolor=SURFACE,
         )
-        self.manual_cards = ft.Row(spacing=8, scroll=ft.ScrollMode.AUTO)
-        self.manual_strip = ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    ft.Text("Manual trace", color=ACCENT, weight=ft.FontWeight.BOLD,
-                            size=12),
-                    ft.Text("Click a value in the inspector to trace it to the "
-                            "first request that holds it",
-                            color=MUTED, size=11),
-                    ft.Container(expand=True),
-                    ft.TextButton("Clear", on_click=lambda _: self._clear_manual_trace()),
-                ], spacing=8),
-                self.manual_cards,
-            ], spacing=6),
-            visible=False,
-            padding=ft.padding.symmetric(horizontal=16, vertical=8),
-            bgcolor=SURFACE_2,
-            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
-        )
         return ft.Column([
             ft.Container(
                 content=ft.Row([
@@ -296,8 +282,65 @@ class ReqvexaApp:
             ),
             ft.Container(content=self.search_field, padding=ft.padding.symmetric(horizontal=16)),
             self.traffic_list_container,
-            self.manual_strip,
             self.traffic_detail_container,
+        ], expand=True, spacing=0)
+
+    def _manual_view(self) -> ft.Control:
+        """The dedicated manual-analysis tab: the trace chain plus an
+        inspector for the currently open trace request."""
+        self.manual_flow_list = ft.ListView(expand=True, spacing=4)
+        self.manual_detail = ft.Container(
+            content=ft.Text(
+                "Pick a request in Traffic, click one of its values, and the "
+                "first request holding it appears here.",
+                color=MUTED,
+            ),
+            expand=True,
+            padding=20,
+            bgcolor=SURFACE,
+        )
+        self.manual_list_container = ft.Container(
+            content=self.manual_flow_list,
+            expand=4,
+            padding=ft.padding.all(10),
+            bgcolor="#0E1626",
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
+        )
+        self.manual_detail_container = ft.Container(
+            content=ft.Column([
+                ft.Text("Traced request / Response", color=ACCENT,
+                        weight=ft.FontWeight.BOLD),
+                self.manual_detail,
+            ], expand=True, spacing=8),
+            expand=6,
+            padding=ft.padding.all(14),
+            bgcolor=SURFACE,
+        )
+        return ft.Column([
+            ft.Container(
+                content=ft.Row([
+                    ft.Text("Manual trace", size=13, weight=ft.FontWeight.BOLD, color=TEXT),
+                    ft.Container(expand=True),
+                    ft.Text("Click a value in any inspector to trace it", color=MUTED, size=11),
+                    ft.Text("Chain height", color=MUTED, size=11),
+                    ft.Slider(
+                        min=20,
+                        max=70,
+                        value=40,
+                        divisions=10,
+                        width=150,
+                        label="{value}%",
+                        on_change=lambda event: self._resize_vertical_split(
+                            event, self.manual_list_container,
+                            self.manual_detail_container,
+                        ),
+                    ),
+                    ft.TextButton("Clear", on_click=lambda _: self._clear_manual_trace()),
+                ], spacing=10),
+                padding=ft.padding.only(left=16, right=16, top=12, bottom=8),
+            ),
+            self.manual_list_container,
+            self.manual_detail_container,
         ], expand=True, spacing=0)
 
     def _analysis_view(self) -> ft.Control:
@@ -348,10 +391,12 @@ class ReqvexaApp:
     def _capture_loaded(self, capture: Any) -> None:
         self.capture = capture
         self.analysis = self.plan = self.report = None
-        # Hop ids/values belong to the previous capture; start a clean strip.
+        # Hop ids/values belong to the previous capture; start a clean trace.
         self.manual_hops.clear()
         self.manual_origin = None
-        self._render_manual_cards()
+        self.manual_open_id = None
+        self.manual_detail.content = self._manual_placeholder()
+        self._render_manual_flow()
         ids = {request.id for request in capture.requests}
         self.target_id = self.target_id if self.target_id in ids else (
             capture.requests[-1].id if capture.requests else None
@@ -426,7 +471,7 @@ class ReqvexaApp:
             return
         if self.manual_origin is None:
             self.manual_origin = origin
-            self._render_manual_cards()
+            self._render_manual_flow()
         display = SecretDisplayPolicy(unsafe_raw=self._show_sensitive()).display(value)
         origin_note = f" ({kind} '{name}')" if name else f" ({kind})"
         self._notify(
@@ -463,7 +508,7 @@ class ReqvexaApp:
             value=value, from_request=from_request,
             found_request=found_request, locations=locations,
         ))
-        self._render_manual_cards()
+        self._render_manual_flow()
         masked = SecretDisplayPolicy(unsafe_raw=self._show_sensitive()).display(value)
         if found_request is None or result is None:
             self._notify(
@@ -475,100 +520,99 @@ class ReqvexaApp:
             f"Value {masked!r} first appeared in request "
             f"#{found_request.sequence} ({locations[0]}).", GREEN,
         )
-        # Open the found request so the user can pick the next value from it.
-        self._show_request(found_request.id)
+        # Surface the Manual tab and open the found request in its inspector
+        # so the user can pick the next value from it.
+        self.main_tabs.selected_index = MANUAL_TAB_INDEX
+        self._select_manual_request(found_request.id)
 
-    def _render_manual_cards(self) -> None:
-        capture = self.capture
-        unsafe_raw = self._show_sensitive()
-        cards: list[ft.Control] = []
-        origin = self.manual_origin
-        if capture is not None and origin is not None:
-            cards.append(self._manual_card(
-                origin,
-                headline=f"#{origin.sequence} {origin.method} "
-                         f"{_ui_path(origin.url, unsafe_raw)}",
-                label="trace origin",
-                openable=True,
-            ))
-            for hop in self.manual_hops:
-                display = SecretDisplayPolicy(unsafe_raw=unsafe_raw).display(hop.value)
-                if hop.found_request is None:
-                    cards.append(self._manual_card(
-                        hop.from_request,
-                        headline=f"{display} - no earlier appearance",
-                        label=f"#{hop.from_request.sequence} dead end",
-                        openable=False,
-                    ))
-                else:
-                    cards.append(self._manual_card(
-                        hop.found_request,
-                        headline=f"#{hop.found_request.sequence} "
-                                 f"{hop.found_request.method} "
-                                 f"{_ui_path(hop.found_request.url, unsafe_raw)}",
-                        label=f"first held {display} ({hop.locations[0]})",
-                        openable=True,
-                    ))
-    def _render_manual_cards(self) -> None:
-        capture = self.capture
-        unsafe_raw = self._show_sensitive()
-        cards: list[ft.Control] = []
-        origin = self.manual_origin
-        if capture is not None and origin is not None:
-            cards.append(self._manual_card(
-                origin,
-                headline=f"#{origin.sequence} {origin.method} "
-                         f"{_ui_path(origin.url, unsafe_raw)}",
-                label="trace origin",
-                openable=True,
-            ))
-            for hop in self.manual_hops:
-                display = SecretDisplayPolicy(unsafe_raw=unsafe_raw).display(hop.value)
-                if hop.found_request is None:
-                    cards.append(self._manual_card(
-                        hop.from_request,
-                        headline=f"{display} - no earlier appearance",
-                        label=f"#{hop.from_request.sequence} dead end",
-                        openable=False,
-                    ))
-                else:
-                    cards.append(self._manual_card(
-                        hop.found_request,
-                        headline=f"#{hop.found_request.sequence} "
-                                 f"{hop.found_request.method} "
-                                 f"{_ui_path(hop.found_request.url, unsafe_raw)}",
-                        label=f"first held {display} ({hop.locations[0]})",
-                        openable=True,
-                    ))
-        self.manual_cards.controls = cards
-        self.manual_strip.visible = bool(cards)
+    def _manual_placeholder(self) -> ft.Text:
+        return ft.Text(
+            "Pick a request in Traffic, click one of its values, and the "
+            "first request holding it appears here.",
+            color=MUTED,
+        )
+
+    def _select_manual_request(self, request_id: str) -> None:
+        """Open one request in the Manual tab's inspector; its values stay
+        clickable so the trace continues from there."""
+        self.manual_open_id = request_id
+        pair = self._view_entry(request_id)
+        if pair is None:
+            self.manual_detail.content = ft.Text(
+                "This entry's content could not be re-read from the capture file.",
+                color=RED,
+            )
+            self.page.update()
+            return
+        request, response = pair
+        self.manual_detail.content = _traffic_detail(
+            request, response, unsafe_raw=self._show_sensitive(),
+            on_value=self._trace_inspector_value,
+        )
         self.page.update()
 
-    def _manual_card(self, request: HttpRequest, headline: str, label: str,
+    def _render_manual_flow(self) -> None:
+        """Rebuild the Manual tab chain: origin card, one card per hop."""
+        unsafe_raw = self._show_sensitive()
+        controls: list[ft.Control] = []
+        origin = self.manual_origin
+        if origin is not None:
+            controls.append(self._manual_card(
+                origin,
+                headline=f"#{origin.sequence} {origin.method} "
+                         f"{_ui_path(origin.url, unsafe_raw)}",
+                note="trace origin",
+                openable=True,
+            ))
+            for hop in self.manual_hops:
+                display = SecretDisplayPolicy(unsafe_raw=unsafe_raw).display(hop.value)
+                if hop.found_request is None:
+                    controls.append(self._manual_card(
+                        hop.from_request,
+                        headline=f"{display}",
+                        note=f"#{hop.from_request.sequence} dead end - "
+                             f"no earlier appearance",
+                        openable=False,
+                    ))
+                else:
+                    controls.append(self._manual_card(
+                        hop.found_request,
+                        headline=f"#{hop.found_request.sequence} "
+                                 f"{hop.found_request.method} "
+                                 f"{_ui_path(hop.found_request.url, unsafe_raw)}",
+                        note=f"first held {display} ({hop.locations[0]})",
+                        openable=True,
+                    ))
+        self.manual_flow_list.controls = controls
+        self.page.update()
+
+    def _manual_card(self, request: HttpRequest, headline: str, note: str,
                      openable: bool) -> ft.Container:
-        """A labelled card for the manual strip; openable ones open the
-        request in the inspector (found requests are always openable)."""
+        """A chain card in the Manual tab; openable cards open their request
+        in the manual inspector so the next value can be picked from it."""
         return ft.Container(
             content=ft.Column([
-                ft.Text(label, color=MUTED, size=10,
+                ft.Text(note, color=MUTED, size=10,
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.Text(headline, color=TEXT, size=11, max_lines=2,
-                        overflow=ft.TextOverflow.ELLIPSIS, font_family="Cascadia Mono"),
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        font_family="Cascadia Mono"),
             ], spacing=3),
-            width=300,
-            padding=8,
+            padding=10,
             bgcolor=SURFACE,
             border=ft.border.all(1, BORDER if openable else "#3A2A2A"),
             border_radius=6,
-            on_click=(lambda _, request_id=request.id: self._show_request(request_id))
+            on_click=(lambda _, request_id=request.id:
+                      self._select_manual_request(request_id))
             if openable else None,
         )
 
     def _clear_manual_trace(self) -> None:
         self.manual_hops.clear()
         self.manual_origin = None
-        self._render_manual_cards()
-
+        self.manual_open_id = None
+        self.manual_detail.content = self._manual_placeholder()
+        self._render_manual_flow()
 
     def _show_request(self, request_id: str) -> None:
         pair = self._view_entry(request_id)
@@ -706,7 +750,7 @@ class ReqvexaApp:
         ))
         self.analysis_tab_by_job[job_id] = len(self.analysis_tabs.tabs) - 1
         self.analysis_tabs.selected_index = len(self.analysis_tabs.tabs) - 1
-        self.main_tabs.selected_index = 2
+        self.main_tabs.selected_index = ANALYSIS_TAB_INDEX
         self.page.update()
 
     def _complete_analysis_tab(self, job_id: int, ordinal: int, target_id: str,
@@ -900,7 +944,9 @@ class ReqvexaApp:
         if self.capture is not None and self.target_id is not None:
             self._render_request_list()
             self._show_request(self.target_id)
-            self._render_manual_cards()
+            self._render_manual_flow()
+            if self.manual_open_id is not None:
+                self._select_manual_request(self.manual_open_id)
         if self.analysis is not None and self.plan is not None and self.target_id is not None:
             self.report = safe_report(
                 self.analysis,
