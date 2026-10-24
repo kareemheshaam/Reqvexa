@@ -5,9 +5,11 @@ import json
 import queue
 import re
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import flet as ft
 
@@ -41,6 +43,26 @@ MAX_BODY_PREVIEW_CHARS = 50_000
 # Bodies larger than this still render fully, but skip JSON syntax
 # highlighting because constructing colored spans over them is slow.
 BODY_HIGHLIGHT_MAX_CHARS = 500_000
+# Short values match practically everything, so manual tracing refuses them.
+MANUAL_VALUE_MIN_CHARS = 2
+
+# (request_id, kind, name, exact raw value) from an inspector value click.
+ValueClickHandler = Callable[[str, str, str, str], None]
+
+
+@dataclass(frozen=True)
+class ManualHop:
+    """One manual-trace step: a value clicked in one request and the
+    earliest strictly-earlier request that holds the exact same value.
+
+    Requests are metadata-only proxies in lazy captures, so hops never hold
+    request/response content.
+    """
+
+    value: str
+    from_request: HttpRequest
+    found_request: HttpRequest | None
+    locations: tuple[str, ...] = ()
 # Individual streaming rows stop at this size; bigger scopes fall back to a
 # summarized counter so a 70,000-observation capture cannot flood the UI.
 MAX_OBSERVED_STREAM_ROWS = 1200
@@ -94,6 +116,12 @@ class ReqvexaApp:
         self.stream_summaries: dict[int, ft.Text] = {}
         self.latest_analysis_tab_index: int | None = None
         self.ignore_boxes: dict[str, ft.Checkbox] = {}
+        # Manual trace state: the request tracing started from and every hop
+        # the user has recorded (one hop per value click, no automations).
+        self.manual_hops: list[ManualHop] = []
+        self.manual_origin: HttpRequest | None = None
+        self.manual_strip: ft.Container
+        self.manual_cards: ft.Row
         # Ignore selections persist across target switches so a value chosen
         # on one request stays ignored for the capture and later requests.
         self.ignored_names: dict[str, bool] = {
@@ -238,6 +266,25 @@ class ReqvexaApp:
             padding=ft.padding.all(14),
             bgcolor=SURFACE,
         )
+        self.manual_cards = ft.Row(spacing=8, scroll=ft.ScrollMode.AUTO)
+        self.manual_strip = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Text("Manual trace", color=ACCENT, weight=ft.FontWeight.BOLD,
+                            size=12),
+                    ft.Text("Click a value in the inspector to trace it to the "
+                            "first request that holds it",
+                            color=MUTED, size=11),
+                    ft.Container(expand=True),
+                    ft.TextButton("Clear", on_click=lambda _: self._clear_manual_trace()),
+                ], spacing=8),
+                self.manual_cards,
+            ], spacing=6),
+            visible=False,
+            padding=ft.padding.symmetric(horizontal=16, vertical=8),
+            bgcolor=SURFACE_2,
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
+        )
         return ft.Column([
             ft.Container(
                 content=ft.Row([
@@ -249,6 +296,7 @@ class ReqvexaApp:
             ),
             ft.Container(content=self.search_field, padding=ft.padding.symmetric(horizontal=16)),
             self.traffic_list_container,
+            self.manual_strip,
             self.traffic_detail_container,
         ], expand=True, spacing=0)
 
@@ -300,6 +348,10 @@ class ReqvexaApp:
     def _capture_loaded(self, capture: Any) -> None:
         self.capture = capture
         self.analysis = self.plan = self.report = None
+        # Hop ids/values belong to the previous capture; start a clean strip.
+        self.manual_hops.clear()
+        self.manual_origin = None
+        self._render_manual_cards()
         ids = {request.id for request in capture.requests}
         self.target_id = self.target_id if self.target_id in ids else (
             capture.requests[-1].id if capture.requests else None
@@ -355,6 +407,169 @@ class ReqvexaApp:
             self._notify(f"Cannot load entry content: {error}", RED)
             return None
 
+    # --------------------------------------------------------- manual trace
+
+    def _trace_inspector_value(self, request_id: str, kind: str, name: str,
+                               value: str) -> None:
+        """Manual trace: find the first request holding this exact value.
+
+        Names are ignored deliberately; the click passes the raw value, the
+        search compares literals only, and every hop is a single step the
+        user chose - nothing recurses on the found request.
+        """
+        capture = self.capture
+        if capture is None or len(value) < MANUAL_VALUE_MIN_CHARS:
+            return
+        try:
+            origin = capture.request(request_id)
+        except KeyError:
+            return
+        if self.manual_origin is None:
+            self.manual_origin = origin
+            self._render_manual_cards()
+        display = SecretDisplayPolicy(unsafe_raw=self._show_sensitive()).display(value)
+        origin_note = f" ({kind} '{name}')" if name else f" ({kind})"
+        self._notify(
+            f"Tracing {display!r}{origin_note} from request "
+            f"#{origin.sequence}...", ACCENT,
+        )
+
+        def worker() -> None:
+            try:
+                result = _first_earlier_occurrence(
+                    capture, request_id, value, capture.view_entry,
+                )
+            except Exception as error:  # surface worker failures in the UI
+                self.events.put(("manual_error", (request_id, value, error)))
+                return
+            self.events.put(("manual_result", (request_id, value, result)))
+
+        threading.Thread(target=worker, daemon=True, name="manual-trace").start()
+
+    def _manual_trace_done(self, payload: tuple[str, str,
+                                               tuple[str, tuple[str, ...]] | None]) -> None:
+        request_id, value, result = payload
+        capture = self.capture
+        if capture is None:
+            return
+        try:
+            from_request = capture.request(request_id)
+            found_request = capture.request(result[0]) if result is not None else None
+        except KeyError:
+            self._notify("Manual trace target no longer exists (capture reloaded).", AMBER)
+            return
+        locations = tuple(result[1]) if result is not None else ()
+        self.manual_hops.append(ManualHop(
+            value=value, from_request=from_request,
+            found_request=found_request, locations=locations,
+        ))
+        self._render_manual_cards()
+        masked = SecretDisplayPolicy(unsafe_raw=self._show_sensitive()).display(value)
+        if found_request is None or result is None:
+            self._notify(
+                f"No earlier request holds {masked!r}; its first appearance is "
+                f"request #{from_request.sequence} itself.", AMBER,
+            )
+            return
+        self._notify(
+            f"Value {masked!r} first appeared in request "
+            f"#{found_request.sequence} ({locations[0]}).", GREEN,
+        )
+        # Open the found request so the user can pick the next value from it.
+        self._show_request(found_request.id)
+
+    def _render_manual_cards(self) -> None:
+        capture = self.capture
+        unsafe_raw = self._show_sensitive()
+        cards: list[ft.Control] = []
+        origin = self.manual_origin
+        if capture is not None and origin is not None:
+            cards.append(self._manual_card(
+                origin,
+                headline=f"#{origin.sequence} {origin.method} "
+                         f"{_ui_path(origin.url, unsafe_raw)}",
+                label="trace origin",
+                openable=True,
+            ))
+            for hop in self.manual_hops:
+                display = SecretDisplayPolicy(unsafe_raw=unsafe_raw).display(hop.value)
+                if hop.found_request is None:
+                    cards.append(self._manual_card(
+                        hop.from_request,
+                        headline=f"{display} - no earlier appearance",
+                        label=f"#{hop.from_request.sequence} dead end",
+                        openable=False,
+                    ))
+                else:
+                    cards.append(self._manual_card(
+                        hop.found_request,
+                        headline=f"#{hop.found_request.sequence} "
+                                 f"{hop.found_request.method} "
+                                 f"{_ui_path(hop.found_request.url, unsafe_raw)}",
+                        label=f"first held {display} ({hop.locations[0]})",
+                        openable=True,
+                    ))
+    def _render_manual_cards(self) -> None:
+        capture = self.capture
+        unsafe_raw = self._show_sensitive()
+        cards: list[ft.Control] = []
+        origin = self.manual_origin
+        if capture is not None and origin is not None:
+            cards.append(self._manual_card(
+                origin,
+                headline=f"#{origin.sequence} {origin.method} "
+                         f"{_ui_path(origin.url, unsafe_raw)}",
+                label="trace origin",
+                openable=True,
+            ))
+            for hop in self.manual_hops:
+                display = SecretDisplayPolicy(unsafe_raw=unsafe_raw).display(hop.value)
+                if hop.found_request is None:
+                    cards.append(self._manual_card(
+                        hop.from_request,
+                        headline=f"{display} - no earlier appearance",
+                        label=f"#{hop.from_request.sequence} dead end",
+                        openable=False,
+                    ))
+                else:
+                    cards.append(self._manual_card(
+                        hop.found_request,
+                        headline=f"#{hop.found_request.sequence} "
+                                 f"{hop.found_request.method} "
+                                 f"{_ui_path(hop.found_request.url, unsafe_raw)}",
+                        label=f"first held {display} ({hop.locations[0]})",
+                        openable=True,
+                    ))
+        self.manual_cards.controls = cards
+        self.manual_strip.visible = bool(cards)
+        self.page.update()
+
+    def _manual_card(self, request: HttpRequest, headline: str, label: str,
+                     openable: bool) -> ft.Container:
+        """A labelled card for the manual strip; openable ones open the
+        request in the inspector (found requests are always openable)."""
+        return ft.Container(
+            content=ft.Column([
+                ft.Text(label, color=MUTED, size=10,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(headline, color=TEXT, size=11, max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS, font_family="Cascadia Mono"),
+            ], spacing=3),
+            width=300,
+            padding=8,
+            bgcolor=SURFACE,
+            border=ft.border.all(1, BORDER if openable else "#3A2A2A"),
+            border_radius=6,
+            on_click=(lambda _, request_id=request.id: self._show_request(request_id))
+            if openable else None,
+        )
+
+    def _clear_manual_trace(self) -> None:
+        self.manual_hops.clear()
+        self.manual_origin = None
+        self._render_manual_cards()
+
+
     def _show_request(self, request_id: str) -> None:
         pair = self._view_entry(request_id)
         if pair is None:
@@ -366,7 +581,8 @@ class ReqvexaApp:
             return
         request, response = pair
         self.detail_panel.content = _traffic_detail(
-            request, response, unsafe_raw=self._show_sensitive()
+            request, response, unsafe_raw=self._show_sensitive(),
+            on_value=self._trace_inspector_value,
         )
         self.page.update()
 
@@ -657,7 +873,8 @@ class ReqvexaApp:
             return
         request, response = pair
         detail.content = _traffic_detail(
-            request, response, unsafe_raw=self._show_sensitive()
+            request, response, unsafe_raw=self._show_sensitive(),
+            on_value=self._trace_inspector_value,
         )
         self.page.update()
 
@@ -683,6 +900,7 @@ class ReqvexaApp:
         if self.capture is not None and self.target_id is not None:
             self._render_request_list()
             self._show_request(self.target_id)
+            self._render_manual_cards()
         if self.analysis is not None and self.plan is not None and self.target_id is not None:
             self.report = safe_report(
                 self.analysis,
@@ -873,6 +1091,13 @@ class ReqvexaApp:
                         if self.capture is not None:
                             self.capture.dematerialize()
                         dirty = True
+                elif kind == "manual_result":
+                    self._manual_trace_done(payload)
+                    dirty = True
+                elif kind == "manual_error":
+                    _request_id, _value, error = payload
+                    self._notify(f"Manual trace failed: {error}", RED)
+                    dirty = True
                 handled += 1
                 if handled >= 25:
                     break
@@ -906,11 +1131,17 @@ class ReqvexaApp:
 
 
 def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
-                    unsafe_raw: bool = False) -> ft.Control:
+                    unsafe_raw: bool = False,
+                    on_value: ValueClickHandler | None = None) -> ft.Control:
+    click: Callable[[str, str, str], None] | None = None
+    if on_value is not None:
+        def click(kind: str, name: str, value: str) -> None:
+            on_value(request.id, kind, name, value)
     request_view = _message_view(
         f"{request.method} {_ui_path(request.url, unsafe_raw)}",
         request.headers, request.body, request.cookies, request.query,
         mime_type=_header_value(request.headers, "content-type"),
+        on_value=click,
     )
     if response is None:
         response_view = ft.Text("No captured response.", color=MUTED)
@@ -923,7 +1154,7 @@ def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
             ]),
             _message_view(
                 "", response.headers, response.body, response.cookies, (),
-                mime_type=response.mime_type,
+                mime_type=response.mime_type, on_value=click,
             ),
         ], expand=True, spacing=10)
     return ft.Row(
@@ -955,12 +1186,14 @@ def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
 
 def _message_view(title: str, headers: Any, body: bytes | None,
                   cookies: Any, query: Any,
-                  mime_type: str | None = None) -> ft.Control:
+                  mime_type: str | None = None,
+                  on_value: Callable[[str, str, str], None] | None = None) -> ft.Control:
     sections: list[ft.Control] = []
     if title:
         sections.append(ft.Text(title, color=ACCENT, weight=ft.FontWeight.BOLD, selectable=True))
     if query:
-        sections.append(_key_value_section("Query parameters", list(query)))
+        sections.append(_key_value_section("Query parameters", list(query),
+                                           kind="query", on_value=on_value))
     if headers:
         # Cookies have their own structured section; showing the raw transport
         # header as well makes the same value appear twice in the inspector.
@@ -971,16 +1204,18 @@ def _message_view(title: str, headers: Any, body: bytes | None,
         ]
         if visible_headers:
             sections.append(_key_value_section(
-                "Headers", [(header.name, header.value) for header in visible_headers]
+                "Headers", [(header.name, header.value) for header in visible_headers],
+                kind="header", on_value=on_value,
             ))
     if cookies:
         sections.append(_key_value_section("Cookies", [(cookie.name, cookie.value)
-                                                        for cookie in cookies]))
+                                                        for cookie in cookies],
+                                           kind="cookie", on_value=on_value))
     if body:
         text = body.decode("utf-8", errors="replace")
         sections.extend([
             ft.Text("Body", color=MUTED, size=12),
-            _body_view(text, mime_type),
+            _body_view(text, mime_type, on_value=on_value),
         ])
     return ft.ListView(
         controls=sections,
@@ -990,7 +1225,8 @@ def _message_view(title: str, headers: Any, body: bytes | None,
     )
 
 
-def _body_view(text: str, mime_type: str | None = None) -> ft.Control:
+def _body_view(text: str, mime_type: str | None = None,
+               on_value: Callable[[str, str, str], None] | None = None) -> ft.Control:
     plain = ft.Text(
         text,
         font_family="Cascadia Mono",
@@ -1017,7 +1253,7 @@ def _body_view(text: str, mime_type: str | None = None) -> ft.Control:
         return plain
     return ft.Container(
         content=ft.Text(
-            spans=_json_spans(text),
+            spans=_json_spans(text, on_value),
             font_family="Cascadia Mono",
             size=11,
             selectable=True,
@@ -1028,7 +1264,8 @@ def _body_view(text: str, mime_type: str | None = None) -> ft.Control:
     )
 
 
-def _json_spans(text: str) -> list[ft.TextSpan]:
+def _json_spans(text: str,
+                on_value: Callable[[str, str, str], None] | None = None) -> list[ft.TextSpan]:
     token_pattern = re.compile(
         r'"(?:\\.|[^"\\])*"|true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\],:]|\s+|.'
     )
@@ -1055,22 +1292,170 @@ def _json_spans(text: str) -> list[ft.TextSpan]:
             color = GREEN
         else:
             color = TEXT
-        spans.append(ft.TextSpan(token, style=ft.TextStyle(color=color)))
+        if on_value is not None and color in {VALUE_COLOR, GREEN}:
+            spans.append(ft.TextSpan(
+                token,
+                style=ft.TextStyle(color=color),
+                on_click=_span_click(token, on_value),
+            ))
+        else:
+            spans.append(ft.TextSpan(token, style=ft.TextStyle(color=color)))
     return spans
 
 
-def _key_value_section(title: str, items: list[tuple[str, str]]) -> ft.Control:
+def _span_click(token: str,
+                on_value: Callable[[str, str, str], None]) -> Callable[[Any], None]:
+    """Clicking a JSON string or number passes its exact literal value back."""
+    def handler(_event: Any) -> None:
+        if token.startswith('"'):
+            try:
+                decoded: Any = json.loads(token)
+            except json.JSONDecodeError:
+                decoded = token.strip('"')
+        else:
+            decoded = token
+        if isinstance(decoded, bool) or not isinstance(decoded, (str, int, float)):
+            return
+        if isinstance(decoded, str) and len(decoded) < MANUAL_VALUE_MIN_CHARS:
+            return
+        on_value("json", "", str(decoded))
+    return handler
+
+
+def _key_value_section(title: str, items: list[tuple[str, str]],
+                       kind: str = "header",
+                       on_value: Callable[[str, str, str], None] | None = None) -> ft.Control:
+    rows: list[ft.Control] = []
+    for name, value in items:
+        value_control: ft.Control = ft.Text(
+            str(value), color=VALUE_COLOR, size=11, selectable=True, expand=True,
+        )
+        if on_value is not None:
+            value_control = ft.Container(
+                content=value_control,
+                tooltip="Find the first earlier request holding this value",
+                on_click=lambda _, raw=str(value), item_name=str(name): on_value(
+                    kind, item_name, raw,
+                ),
+            )
+        rows.append(ft.Row([
+            ft.Text(str(name), color=NAME_COLOR, weight=ft.FontWeight.BOLD, size=11),
+            ft.Text(":", color=MUTED),
+            value_control,
+        ], spacing=3))
     return ft.Column([
         ft.Text(title, color=MUTED, size=12),
-        ft.Column([
-            ft.Row([
-                ft.Text(str(name), color=NAME_COLOR, weight=ft.FontWeight.BOLD, size=11),
-                ft.Text(":", color=MUTED),
-                ft.Text(str(value), color=VALUE_COLOR, size=11, selectable=True, expand=True),
-            ], spacing=3)
-            for name, value in items
-        ], spacing=3),
+        ft.Column(rows, spacing=3),
     ], spacing=4)
+
+
+def _first_earlier_occurrence(
+    capture: Capture,
+    exclude_request_id: str,
+    value: str,
+    view: Callable[[str], tuple[HttpRequest, HttpResponse | None]],
+) -> tuple[str, tuple[str, ...]] | None:
+    """Search for the exact literal value backwards through the capture.
+
+    Requests are compared in capture order; the clicked request itself is
+    skipped, and the earliest strictly-earlier request whose content holds
+    the identical string wins. Names (header/cookie/key) are ignored on
+    purpose - only the value text matters. Single one-step search: no
+    recursion from the found request.
+    """
+    requests = capture.requests
+    clicked_index = next(
+        (index for index, request in enumerate(requests)
+         if request.id == exclude_request_id), None,
+    )
+    if clicked_index is None:
+        return None
+    for candidate in requests[:clicked_index]:
+        pair = view(candidate.id)
+        if pair is None:
+            continue
+        locations = _value_locations(pair[0], pair[1], value)
+        if locations:
+            return candidate.id, tuple(locations)
+    return None
+
+
+def _value_locations(request: HttpRequest, response: HttpResponse | None,
+                     value: str) -> list[str]:
+    """Where the exact value appears in one entry, as display labels."""
+    locations = [
+        f"request header '{header.name}'"
+        for header in request.headers if header.value == value
+    ]
+    locations.extend(
+        f"request cookie '{cookie.name}'"
+        for cookie in request.cookies if cookie.value == value
+    )
+    locations.extend(
+        f"query '{key}'" for key, entry in request.query if entry == value
+    )
+    if request.body is not None:
+        locations.extend(_body_locations(request.body, "request", value))
+    if response is not None:
+        locations.extend(
+            f"response header '{header.name}'"
+            for header in response.headers if header.value == value
+        )
+        locations.extend(
+            f"response cookie '{cookie.name}'"
+            for cookie in response.cookies if cookie.value == value
+        )
+        if response.body is not None:
+            locations.extend(_body_locations(response.body, "response", value))
+    return locations[:4]
+
+
+def _body_locations(raw: bytes, side: str, value: str) -> list[str]:
+    text = raw.decode("utf-8", errors="replace")
+    if value not in text:
+        return []
+    fields = _body_value_fields(text, value)
+    return [f"{side} body field '{field}'" for field in fields] or [f"{side} body"]
+
+
+def _body_value_fields(text: str, value: str) -> list[str]:
+    """Name the form field or JSON path holding the value, when cheap."""
+    if len(text) > MAX_BODY_PREVIEW_CHARS:
+        return []
+    hits: list[str] = []
+    if text.lstrip()[:1] not in {"{", "["}:
+        for key, entry in parse_qsl(text, keep_blank_values=True):
+            if entry == value:
+                hits.append(key)
+                if len(hits) >= 2:
+                    return hits
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return hits
+    _json_value_fields(parsed, value, "", hits)
+    return hits[:2]
+
+
+def _json_value_fields(item: Any, value: str, path: str, hits: list[str],
+                       depth: int = 0) -> None:
+    """Collect JSON paths whose string or number scalar equals the value."""
+    if len(hits) >= 2 or depth > 30:
+        return
+    if isinstance(item, dict):
+        for key, child in item.items():
+            _json_value_fields(child, value, f"{path}.{key}" if path else str(key),
+                               hits, depth + 1)
+    elif isinstance(item, list):
+        for index, child in enumerate(item):
+            _json_value_fields(child, value, f"{path}.{index}" if path else str(index),
+                               hits, depth + 1)
+    elif isinstance(item, bool):
+        return
+    elif isinstance(item, (int, float)) and str(item) == value and path:
+        hits.append(path)
+    elif isinstance(item, str) and item == value and path:
+        hits.append(path)
 
 
 def _request_hints(request: HttpRequest, response: HttpResponse | None = None) -> list[str]:

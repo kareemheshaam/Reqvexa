@@ -7,6 +7,22 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Manual value tracing in the GUI: clicking a value in the traffic or
+  analysis inspector (header, cookie, query parameter, or a JSON body
+  string/number) searches the capture for the first strictly-earlier
+  request that holds the exact same literal, ignoring names entirely -
+  a cookie value clicked on one request is found anywhere any other
+  header, cookie, form field, or body path holds it. The found request is
+  appended to a "Manual trace" strip and opened in the inspector, so the
+  next value can be picked from it and the process repeated by hand; one
+  hop records per click and nothing is searched recursively from the
+  found request. Dead ends ("first appearance is this request itself")
+  are reported in place, the strip stays visible between steps, and the
+  Clear button or a capture reload resets it. The search parses entries
+  on demand (lazy captures stay low-memory): tracing JSESSIONID from
+  request #552 to request #16 of the reference capture runs instantly,
+  and a full not-found scan of all earlier entries takes ~0.2s. Trace
+  values stay masked unless "Show sensitive values" is on.
 - `reqvexa requests` subcommand that lists request IDs, methods, and redacted
   paths so `--request` values can be discovered from the CLI.
 - `--request` selectors: accept a request ID, an entry index (including

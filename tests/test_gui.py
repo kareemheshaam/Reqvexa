@@ -33,6 +33,7 @@ from reqvexa.gui import (
     _header_value,
     _json_keys,
     _json_spans,
+    _key_value_section,
     _method_color,
     _observation_name,
     _request_hints,
@@ -200,6 +201,18 @@ def load_capture(app: ReqvexaApp, path: str) -> None:
 def run_analysis(app: ReqvexaApp) -> None:
     app._analyze()
     wait_for(app, lambda: app.latest_analysis_tab_index is not None)
+
+
+def body_entry(method: str, url: str, body_text: str, mime: str,
+               headers=None) -> dict:
+    """A bare entry whose request carries a body and no response."""
+    return {
+        "startedDateTime": "2026-08-29T00:00:00Z", "time": 1,
+        "timings": {"wait": 1},
+        "request": {"method": method, "url": url, "httpVersion": "HTTP/1.1",
+                    "headers": headers or [], "cookies": [],
+                    "postData": {"mimeType": mime, "text": body_text}},
+    }
 
 
 # ---------------------------------------------------- helper unit tests ---
@@ -675,3 +688,147 @@ def test_observation_stream_switches_to_summary_when_flooded(app: ReqvexaApp, tm
     assert any("(row previews capped at 1,200)" in value for value in values)
     assert len(stream.controls) == 1
     assert app.stream_summaries[job] is stream.controls[0]
+
+
+# ------------------------------------------------------- manual trace ---
+
+
+def clickable_controls(control: Any) -> list[Any]:
+    return [
+        node for node in walk(control)
+        if isinstance(node, ft.Container) and getattr(node, "on_click", None) is not None
+    ]
+
+
+def test_key_value_rows_report_exact_raw_values():
+    captured: list[tuple[str, str, str]] = []
+    section = _key_value_section(
+        "Headers", [("auth", "Bearer abc-123"), ("x-other", "row-value-2")],
+        kind="header",
+        on_value=lambda kind, name, value: captured.append((kind, name, value)),
+    )
+    clickable = clickable_controls(section)
+    assert len(clickable) == 2
+    clickable[0].on_click(None)
+    assert captured == [("header", "auth", "Bearer abc-123")]
+
+
+def test_json_spans_make_values_clickable_but_not_keys_or_literals():
+    captured: list[str] = []
+    spans = _json_spans(
+        '{"keep":"val-1","n":42,"flag":true,"other":"val-2"}',
+        on_value=lambda kind, name, value: captured.append(value),
+    )
+    handlers = [span.on_click for span in spans if span.on_click is not None]
+    assert len(handlers) == 3  # val-1, 42, val-2 - keys/bools/null not clickable
+    for handler in handlers:
+        handler(None)
+    assert captured == ["val-1", "42", "val-2"]
+
+
+def test_manual_trace_finds_first_request_holding_the_value(app: ReqvexaApp,
+                                                            tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    products = app.capture.requests[1]
+    app._select_request(products.id)
+
+    app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+
+    hop = app.manual_hops[0]
+    assert hop.value == TOKEN
+    assert hop.from_request.id == products.id
+    assert hop.found_request is not None and hop.found_request.sequence == 0
+    assert "response body field 'csrf'" in hop.locations
+    assert app.manual_strip.visible
+    assert len(app.manual_cards.controls) == 2  # origin card + one hop
+    # The found request opened in the inspector for the next value pick.
+    assert has_text(app.detail_panel, "/login")
+    run_poll(app, 0.25)  # one hop per click: nothing searched further
+    assert len(app.manual_hops) == 1
+
+
+def test_manual_trace_dead_end_reports_no_earlier_appearance(app: ReqvexaApp,
+                                                             tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    login = app.capture.requests[0]
+    app._select_request(login.id)
+
+    app._trace_inspector_value(login.id, "json", "csrf", TOKEN)
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+
+    hop = app.manual_hops[0]
+    assert hop.found_request is None and not hop.locations
+    assert "first appearance is request #0" in app.status_text.value
+    assert any("no earlier appearance" in value for value in texts(app.manual_strip))
+    assert has_text(app.detail_panel, "/login")  # inspector unchanged on dead end
+
+
+def test_manual_trace_ignores_names_and_hits_first_appearance_first(app: ReqvexaApp,
+                                                                    tmp_path: Path):
+    entries = [
+        body_entry("POST", "https://example.test/intro",
+                   '{"weird_key":"svc-9821"}', "application/json"),
+        body_entry("POST", "https://example.test/form-bearer",
+                   "pad=x&csrf_token=frm-77", "application/x-www-form-urlencoded"),
+        entry("GET", "https://example.test/kit", headers=[
+            {"name": "X-Different-Name", "value": "svc-9821"},
+        ]),
+    ]
+    load_capture(app, write_har(tmp_path, entries))
+    kit = app.capture.requests[2]
+
+    app._trace_inspector_value(kit.id, "header", "x-different-name", "svc-9821")
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+    first = app.manual_hops[0]
+    assert first.found_request is not None and first.found_request.sequence == 0
+    assert first.locations == ("request body field 'weird_key'",)
+
+    app._trace_inspector_value(kit.id, "header", "x-different-name", "frm-77")
+    wait_for(app, lambda: len(app.manual_hops) == 2)
+    second = app.manual_hops[1]
+    assert second.found_request is not None and second.found_request.sequence == 1
+    assert second.locations == ("request body field 'csrf_token'",)
+
+
+def test_manual_strip_masks_values_until_revealed(app: ReqvexaApp, tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    products = app.capture.requests[1]
+    app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+
+    shown = texts(app.manual_strip)
+    assert not any(TOKEN in value for value in shown)  # masked by default
+    assert any(value.count("*") == 16 for value in shown)
+    app.reveal_switch.value = True
+    app._refresh_sensitive_views()
+    assert any(TOKEN in value for value in texts(app.manual_strip))
+
+
+def test_manual_trace_clear_and_capture_reload_reset(app: ReqvexaApp,
+                                                     tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    products = app.capture.requests[1]
+    app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+
+    app._clear_manual_trace()
+    assert len(app.manual_hops) == 0 and app.manual_origin is None
+    assert not app.manual_strip.visible
+
+    app._trace_inspector_value(products.id, "cookie", "session", TOKEN)
+    wait_for(app, lambda: len(app.manual_hops) == 1)
+    second = tmp_path / "second.har"
+    second.write_text(json.dumps(har(standard_entries())), encoding="utf-8")
+    load_capture(app, str(second))
+    assert len(app.manual_hops) == 0 and app.manual_origin is None
+    assert not app.manual_strip.visible
+
+
+def test_manual_trace_rejects_values_too_short(app: ReqvexaApp, tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    kit = app.capture.requests[2]
+    app._trace_inspector_value(kit.id, "header", "x-short", "9")
+    run_poll(app, 0.2)
+    assert len(app.manual_hops) == 0
+    assert not app.manual_strip.visible
