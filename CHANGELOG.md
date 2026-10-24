@@ -55,6 +55,12 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- GUI body previews no longer truncate: request and response bodies render
+  in full text since only one entry is parsed at a time on selection
+  (largest reference-capture body ≈498 KB renders fine). Bodies above
+  ~500 KB still show complete, but skip JSON syntax highlighting to avoid a
+  multi-second pause while coloring hundreds of spans; the note says so.
+
 - `trace` output now redacts the target query string by default, aligning it
   with the safe report privacy contract.
 - Analysis-time performance: request lookup, version lookup, response lookup,

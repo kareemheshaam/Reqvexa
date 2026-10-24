@@ -35,7 +35,12 @@ AMBER = "#FBBF24"
 RED = "#FB7185"
 NAME_COLOR = "#A78BFA"
 VALUE_COLOR = "#67E8F9"
+# Cap for JSON-key collection when building ignore-panel hint options; body
+# display never truncates since entries load one at a time on selection.
 MAX_BODY_PREVIEW_CHARS = 50_000
+# Bodies larger than this still render fully, but skip JSON syntax
+# highlighting because constructing colored spans over them is slow.
+BODY_HIGHLIGHT_MAX_CHARS = 500_000
 # Individual streaming rows stop at this size; bigger scopes fall back to a
 # summarized counter so a 70,000-observation capture cannot flood the UI.
 MAX_OBSERVED_STREAM_ROWS = 1200
@@ -986,34 +991,30 @@ def _message_view(title: str, headers: Any, body: bytes | None,
 
 
 def _body_view(text: str, mime_type: str | None = None) -> ft.Control:
-    if len(text) > MAX_BODY_PREVIEW_CHARS:
-        preview = text[:MAX_BODY_PREVIEW_CHARS]
+    plain = ft.Text(
+        text,
+        font_family="Cascadia Mono",
+        size=11,
+        color=VALUE_COLOR,
+        selectable=True,
+    )
+    if mime_type and "json" not in mime_type.lower():
+        return plain
+    if len(text) > BODY_HIGHLIGHT_MAX_CHARS:
+        # Building colored spans over a huge body takes noticeably longer
+        # than rendering the text, so those bodies stay plain but complete.
         return ft.Column([
             ft.Text(
-                f"Large body truncated for UI safety ({len(text):,} characters).",
-                color=AMBER, size=11,
+                f"Body shown fully without syntax highlighting "
+                f"({len(text):,} characters).",
+                color=MUTED, size=11,
             ),
-            ft.Text(
-                preview,
-                font_family="Cascadia Mono",
-                size=11,
-                color=VALUE_COLOR,
-                selectable=True,
-            ),
+            plain,
         ], spacing=8)
-    if mime_type and "json" not in mime_type.lower():
-        return ft.Text(
-            text,
-            font_family="Cascadia Mono",
-            size=11,
-            color=VALUE_COLOR,
-            selectable=True,
-        )
     try:
         json.loads(text)
     except json.JSONDecodeError:
-        return ft.Text(text, font_family="Cascadia Mono", size=11,
-                       color=VALUE_COLOR, selectable=True)
+        return plain
     return ft.Container(
         content=ft.Text(
             spans=_json_spans(text),

@@ -284,15 +284,20 @@ def test_header_value_matches_case_insensitively_or_none():
     assert _header_value(headers, "Accept") is None
 
 
-def test_body_view_renders_json_grid_plain_text_and_truncates():
-    from reqvexa.gui import MAX_BODY_PREVIEW_CHARS
+def test_body_view_renders_full_json_grid_plain_text_without_highlight():
+    from reqvexa.gui import BODY_HIGHLIGHT_MAX_CHARS
 
     rendered = _body_view('{"k":1}', "application/json")
     assert isinstance(rendered, ft.Container)
     assert _body_view('{"k":1', "application/json") is not None  # invalid JSON
     assert isinstance(_body_view("<html>", "text/html"), ft.Text)
-    large = _body_view("x" * (MAX_BODY_PREVIEW_CHARS + 1), "application/json")
-    assert "truncated" in " ".join(texts(large))
+    # Huge bodies are not truncated: they render fully, just unhighlighted.
+    huge = "x" * (BODY_HIGHLIGHT_MAX_CHARS + 1)
+    big = _body_view(huge, "application/json")
+    assert "without syntax highlighting" in " ".join(texts(big))
+    assert huge in " ".join(texts(big))
+    assert "truncated" not in " ".join(texts(big))
+
 
 
 def test_default_ignored_hints_are_transport_metadata_only():
