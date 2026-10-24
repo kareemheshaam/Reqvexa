@@ -321,7 +321,8 @@ class ReqvexaApp:
                 content=ft.Row([
                     ft.Text("Manual trace", size=13, weight=ft.FontWeight.BOLD, color=TEXT),
                     ft.Container(expand=True),
-                    ft.Text("Click a value in any inspector to trace it", color=MUTED, size=11),
+                    ft.Text("Click a value to trace it - the copy icon copies it",
+                            color=MUTED, size=11),
                     ft.Text("Chain height", color=MUTED, size=11),
                     ft.Slider(
                         min=20,
@@ -491,6 +492,18 @@ class ReqvexaApp:
 
         threading.Thread(target=worker, daemon=True, name="manual-trace").start()
 
+    def _copy_inspector_value(self, request_id: str, kind: str, name: str,
+                              value: str) -> None:
+        """Put the exact raw value on the clipboard (copy icon clicks)."""
+        try:
+            self.page.set_clipboard(value)
+        except Exception as error:  # clipboard can be unavailable on some hosts
+            self._notify(f"Copy failed: {error}", RED)
+            return
+        self._notify(
+            f"Copied a {len(value):,}-character value to the clipboard.", MUTED,
+        )
+
     def _manual_trace_done(self, payload: tuple[str, str,
                                                tuple[str, tuple[str, ...]] | None]) -> None:
         request_id, value, result = payload
@@ -548,6 +561,7 @@ class ReqvexaApp:
         self.manual_detail.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive(),
             on_value=self._trace_inspector_value,
+            on_copy=self._copy_inspector_value,
         )
         self.page.update()
 
@@ -627,6 +641,7 @@ class ReqvexaApp:
         self.detail_panel.content = _traffic_detail(
             request, response, unsafe_raw=self._show_sensitive(),
             on_value=self._trace_inspector_value,
+            on_copy=self._copy_inspector_value,
         )
         self.page.update()
 
@@ -1178,16 +1193,21 @@ class ReqvexaApp:
 
 def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
                     unsafe_raw: bool = False,
-                    on_value: ValueClickHandler | None = None) -> ft.Control:
+                    on_value: ValueClickHandler | None = None,
+                    on_copy: ValueClickHandler | None = None) -> ft.Control:
     click: Callable[[str, str, str], None] | None = None
     if on_value is not None:
         def click(kind: str, name: str, value: str) -> None:
             on_value(request.id, kind, name, value)
+    copy_value: Callable[[str, str, str], None] | None = None
+    if on_copy is not None:
+        def copy_value(kind: str, name: str, value: str) -> None:
+            on_copy(request.id, kind, name, value)
     request_view = _message_view(
         f"{request.method} {_ui_path(request.url, unsafe_raw)}",
         request.headers, request.body, request.cookies, request.query,
         mime_type=_header_value(request.headers, "content-type"),
-        on_value=click,
+        on_value=click, on_copy=copy_value, side="request",
     )
     if response is None:
         response_view = ft.Text("No captured response.", color=MUTED)
@@ -1200,7 +1220,8 @@ def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
             ]),
             _message_view(
                 "", response.headers, response.body, response.cookies, (),
-                mime_type=response.mime_type, on_value=click,
+                mime_type=response.mime_type,
+                on_value=click, on_copy=copy_value, side="response",
             ),
         ], expand=True, spacing=10)
     return ft.Row(
@@ -1233,13 +1254,16 @@ def _traffic_detail(request: HttpRequest, response: HttpResponse | None,
 def _message_view(title: str, headers: Any, body: bytes | None,
                   cookies: Any, query: Any,
                   mime_type: str | None = None,
-                  on_value: Callable[[str, str, str], None] | None = None) -> ft.Control:
+                  on_value: Callable[[str, str, str], None] | None = None,
+                  on_copy: Callable[[str, str, str], None] | None = None,
+                  side: str = "request") -> ft.Control:
     sections: list[ft.Control] = []
     if title:
         sections.append(ft.Text(title, color=ACCENT, weight=ft.FontWeight.BOLD, selectable=True))
     if query:
         sections.append(_key_value_section("Query parameters", list(query),
-                                           kind="query", on_value=on_value))
+                                           kind="query", on_value=on_value,
+                                           on_copy=on_copy))
     if headers:
         # Cookies have their own structured section; showing the raw transport
         # header as well makes the same value appear twice in the inspector.
@@ -1251,16 +1275,29 @@ def _message_view(title: str, headers: Any, body: bytes | None,
         if visible_headers:
             sections.append(_key_value_section(
                 "Headers", [(header.name, header.value) for header in visible_headers],
-                kind="header", on_value=on_value,
+                kind="header", on_value=on_value, on_copy=on_copy,
             ))
     if cookies:
         sections.append(_key_value_section("Cookies", [(cookie.name, cookie.value)
                                                         for cookie in cookies],
-                                           kind="cookie", on_value=on_value))
+                                           kind="cookie", on_value=on_value,
+                                           on_copy=on_copy))
     if body:
         text = body.decode("utf-8", errors="replace")
+        body_label: ft.Control = ft.Text("Body", color=MUTED, size=12)
+        if on_copy is not None:
+            body_label = ft.Row([
+                ft.Text("Body", color=MUTED, size=12),
+                ft.Container(expand=True),
+                ft.IconButton(
+                    icon=ft.Icons.CONTENT_COPY, icon_size=13,
+                    on_click=lambda _, body_text=text: on_copy(
+                        f"{side}-body", "", body_text,
+                    ),
+                ),
+            ])
         sections.extend([
-            ft.Text("Body", color=MUTED, size=12),
+            body_label,
             _body_view(text, mime_type, on_value=on_value),
         ])
     return ft.ListView(
@@ -1302,7 +1339,10 @@ def _body_view(text: str, mime_type: str | None = None,
             spans=_json_spans(text, on_value),
             font_family="Cascadia Mono",
             size=11,
-            selectable=True,
+            # Selectable text swallows span taps, so bodies with traceable
+            # values render non-selectable; copying large bodies goes through
+            # the copy icon next to the "Body" label.
+            selectable=on_value is None,
         ),
         bgcolor="#0A0F1C",
         padding=ft.padding.all(10),
@@ -1370,25 +1410,41 @@ def _span_click(token: str,
 
 def _key_value_section(title: str, items: list[tuple[str, str]],
                        kind: str = "header",
-                       on_value: Callable[[str, str, str], None] | None = None) -> ft.Control:
+                       on_value: Callable[[str, str, str], None] | None = None,
+                       on_copy: Callable[[str, str, str], None] | None = None) -> ft.Control:
     rows: list[ft.Control] = []
     for name, value in items:
-        value_control: ft.Control = ft.Text(
-            str(value), color=VALUE_COLOR, size=11, selectable=True, expand=True,
-        )
+        row: list[ft.Control] = [
+            ft.Text(str(name), color=NAME_COLOR, weight=ft.FontWeight.BOLD, size=11),
+            ft.Text(":", color=MUTED),
+        ]
+        if on_copy is not None:
+            copy_button = ft.IconButton(
+                icon=ft.Icons.CONTENT_COPY, icon_size=13,
+                on_click=lambda _, raw=str(value), item_name=str(name): on_copy(
+                    kind, item_name, raw,
+                ),
+            )
+            copy_button.tooltip = "Copy value"
+            row.append(copy_button)
         if on_value is not None:
-            value_control = ft.Container(
-                content=value_control,
-                tooltip="Find the first earlier request holding this value",
+            # Selectable text swallows the pointer in Flet, so a value that
+            # can be traced cannot also start a text selection; copying goes
+            # through the copy icon instead.
+            value_control: ft.Control = ft.Container(
+                content=ft.Text(str(value), color=VALUE_COLOR, size=11, expand=True),
                 on_click=lambda _, raw=str(value), item_name=str(name): on_value(
                     kind, item_name, raw,
                 ),
             )
-        rows.append(ft.Row([
-            ft.Text(str(name), color=NAME_COLOR, weight=ft.FontWeight.BOLD, size=11),
-            ft.Text(":", color=MUTED),
-            value_control,
-        ], spacing=3))
+            value_control.tooltip = "Click to find the first earlier request holding this value"
+        else:
+            value_control = ft.Text(
+                str(value), color=VALUE_COLOR, size=11,
+                selectable=True, expand=True,
+            )
+        row.append(value_control)
+        rows.append(ft.Row(row, spacing=3))
     return ft.Column([
         ft.Text(title, color=MUTED, size=12),
         ft.Column(rows, spacing=3),

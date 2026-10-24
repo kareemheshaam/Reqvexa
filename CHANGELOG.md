@@ -116,6 +116,13 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Clickable inspector values no longer start a text selection instead of
+  tracing: selectable text swallows pointer events in Flet, so traceable
+  header/cookie/query values and JSON body values render non-selectable
+  and clicking them behaves as the trace action. Copying is preserved
+  through a small copy-icon button next to every value (and next to the
+  "Body" label for whole bodies), which puts the exact raw value on the
+  clipboard via the new app copy handler.
 - Cancelled analyses no longer silently skip candidate sources during
   producer inference and return degraded partial results instead of raising.
 - GUI observation streaming no longer builds a control chain per observation

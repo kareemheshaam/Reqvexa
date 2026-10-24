@@ -58,12 +58,16 @@ class FakePage:
         self.update_count = 0
         self.handler: Callable[..., Any] | None = None
         self.tasks: list[Any] = []  # one created-but-unstarted coroutine
+        self.clipboard: str | None = None
         for attribute in ("bgcolor", "padding", "theme", "dark_theme",
                           "theme_mode", "window_min_width", "window_min_height"):
             setattr(self, attribute, None)
 
     def add(self, *controls: ft.Control) -> None:
         self.controls.extend(controls)
+
+    def set_clipboard(self, value: str) -> None:
+        self.clipboard = value
 
     def update(self) -> None:
         self.update_count += 1
@@ -711,11 +715,32 @@ def test_key_value_rows_report_exact_raw_values():
         "Headers", [("auth", "Bearer abc-123"), ("x-other", "row-value-2")],
         kind="header",
         on_value=lambda kind, name, value: captured.append((kind, name, value)),
+        on_copy=lambda kind, name, value: captured.append(("copy-" + kind, name, value)),
     )
     clickable = clickable_controls(section)
     assert len(clickable) == 2
     clickable[0].on_click(None)
     assert captured == [("header", "auth", "Bearer abc-123")]
+    # The copy icon sits next to the value because selectable text swallows
+    # the trace click; it copies the exact raw value.
+    copies = [node for node in walk(section) if isinstance(node, ft.IconButton)]
+    assert len(copies) == 2
+    copies[0].on_click(None)
+    assert captured[-1] == ("copy-header", "auth", "Bearer abc-123")
+    # Traceable value text itself is not selectable (that stole the click).
+    traceable = [node for node in walk(clickable[0])
+                 if isinstance(node, ft.Text)]
+    assert traceable and all(not node.selectable for node in traceable)
+
+
+def test_plain_sections_without_trace_callback_stay_selectable():
+    section = _key_value_section("Headers", [("auth", "x")], kind="header")
+    assert not clickable_controls(section)
+    value = next(
+        node for node in walk(section)
+        if isinstance(node, ft.Text) and node.value == "x"
+    )
+    assert value.selectable
 
 
 def test_json_spans_make_values_clickable_but_not_keys_or_literals():
@@ -729,6 +754,53 @@ def test_json_spans_make_values_clickable_but_not_keys_or_literals():
     for handler in handlers:
         handler(None)
     assert captured == ["val-1", "42", "val-2"]
+
+
+def test_clickable_json_body_disables_selection_but_plain_bodies_keep_it():
+    spanned = _body_view('{"k":"val-1"}', "application/json",
+                         on_value=lambda kind, name, value: None)
+    spanned_text = next(
+        node for node in walk(spanned)
+        if isinstance(node, ft.Text) and node.spans
+    )
+    assert not spanned_text.selectable  # selectable text eats span taps
+
+    dead = _body_view('{"k":"val-1"}', "application/json")
+    dead_text = next(
+        node for node in walk(dead)
+        if isinstance(node, ft.Text) and getattr(node, "spans", None)
+    )
+    assert dead_text.selectable is True
+
+    plain = _body_view("hello world", "text/plain",
+                       on_value=lambda kind, name, value: None)
+    plain_text = next(
+        node for node in walk(plain) if isinstance(node, ft.Text)
+    )
+    assert plain_text.selectable  # untraced bodies still allow text selection
+
+
+def test_copy_button_copies_exact_value(app: ReqvexaApp, tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    login = app.capture.requests[0]
+    app._copy_inspector_value(login.id, "cookie", "session", TOKEN)
+    assert app.page.clipboard == TOKEN
+    assert "Copied" in app.status_text.value
+
+
+def test_inspector_rows_are_clickable_with_copy_icons(app: ReqvexaApp,
+                                                      tmp_path: Path):
+    load_capture(app, write_har(tmp_path, standard_entries()))
+    app._select_request(app.capture.requests[0].id)
+    clickable = [
+        node for node in walk(app.detail_panel.content)
+        if isinstance(node, ft.Container) and getattr(node, "on_click", None) is not None
+    ]
+    copies = [
+        node for node in walk(app.detail_panel.content)
+        if isinstance(node, ft.IconButton)
+    ]
+    assert clickable and copies
 
 
 def test_manual_trace_finds_first_request_holding_the_value(app: ReqvexaApp,
