@@ -1,0 +1,4 @@
+include CHANGELOG.md
+include CONTRIBUTING.md
+recursive-include fixtures *
+recursive-include tests *.py

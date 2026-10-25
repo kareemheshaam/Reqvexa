@@ -20,11 +20,25 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install build
       - run: python -m build
+      - name: Extract changelog for this tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { show=1; print; next }
+            show && /^## \[/ { exit }
+            show { print }
+          ' CHANGELOG.md > release-notes.md
       - name: Publish dist artifacts to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *a[0-9]*|*b[0-9]*|*rc[0-9]*|*-*) prerelease="--prerelease" ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
+            --notes "$(cat release-notes.md)" \
+            $prerelease \
             dist/*.tar.gz dist/*.whl
