@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from reqvexa.cancellation import AnalysisCancelled
-from reqvexa.extraction.candidates import decode_base64_candidate
+from reqvexa.extraction.candidates import decode_base64_candidate, is_file_response
 from reqvexa.models import (
     Capture,
     DependencyCategory,
@@ -54,6 +54,9 @@ class Analysis:
     logical_values: dict[str, LogicalValue]
     observation_value_ids: dict[str, str] = field(default_factory=dict)
     versions_by_value: dict[str, tuple[ValueVersion, ...]] = field(default_factory=dict)
+    # Whether the scope and producer search followed values recursively.
+    # Tracing, planning, and reporting default to the same depth.
+    recursive: bool = True
     _versions_index: dict[str, dict[str, ValueVersion]] = field(
         default_factory=dict, repr=False
     )
@@ -66,7 +69,16 @@ class Analysis:
         for version in self.versions.values():
             self._versions_index.setdefault(version.value_id, {})[version.version_id] = version
 
-    def trace(self, request_id: str) -> tuple[TraceNode, ...]:
+    def trace(self, request_id: str,
+              recursive: bool | None = None) -> tuple[TraceNode, ...]:
+        """Trace the state behind one request.
+
+        ``recursive=False`` keeps every target node at one level: producer
+        hypotheses are reported, but no values are followed further back.
+        ``None`` inherits the depth the analysis was built with.
+        """
+        if recursive is None:
+            recursive = self.recursive
         if request_id not in self.request_observation_ids:
             raise KeyError(f"Unknown request: {request_id}")
         request = self.capture.request(request_id)
@@ -75,7 +87,10 @@ class Analysis:
             observation = self.observations_by_id[observation_id]
             version = self._version_for_observation(observation, request.sequence)
             if version is not None:
-                roots.append(self.trace_version(version.version_id))
+                roots.append(
+                    self.trace_version(version.version_id) if recursive
+                    else self._flat_trace_version(version.version_id)
+                )
         unique_roots = {node.version_id: node for node in roots}
         return tuple(sorted(unique_roots.values(), key=lambda node: (node.value_id, node.version_id)))
 
@@ -101,9 +116,7 @@ class Analysis:
         active.add(version_id)
         hypotheses = self.target_producers.get(version_id, ())
         if not hypotheses:
-            status = "UNKNOWN"
-            note = "No matching value was observed in prior responses." if version_id in self.negative_evidence else None
-            result = TraceNode(version_id, version.value_id, status, note=note)
+            result = self._flat_trace_version(version_id)
         else:
             children: list[TraceNode] = []
             for hypothesis in hypotheses:
@@ -117,10 +130,10 @@ class Analysis:
                         observation, self.capture.request(producer_request).sequence)
                     if child_version and child_version.version_id != version_id:
                         children.append(self._trace_version(child_version.version_id, memo, active))
-            status = "SUPPORTED" if any(h.status == "SUPPORTED" for h in hypotheses) else "HYPOTHETICAL"
+            flat = self._flat_trace_version(version_id)
             result = TraceNode(
-                version_id, version.value_id, status,
-                producer_ids=tuple(sorted({h.producer for h in hypotheses})),
+                flat.version_id, flat.value_id, flat.status,
+                producer_ids=flat.producer_ids,
                 children=tuple(
                     sorted({child.version_id: child for child in children}.values(),
                            key=lambda node: node.version_id)
@@ -129,6 +142,21 @@ class Analysis:
         active.remove(version_id)
         memo[version_id] = result
         return result
+
+    def _flat_trace_version(self, version_id: str) -> TraceNode:
+        """One version's own trace node: status and direct producers only."""
+        version = self.versions[version_id]
+        hypotheses = self.target_producers.get(version_id, ())
+        if not hypotheses:
+            note = ("No matching value was observed in prior responses."
+                    if version_id in self.negative_evidence else None)
+            return TraceNode(version_id, version.value_id, "UNKNOWN", note=note)
+        return TraceNode(
+            version_id, version.value_id,
+            "SUPPORTED" if any(h.status == "SUPPORTED" for h in hypotheses)
+            else "HYPOTHETICAL",
+            producer_ids=tuple(sorted({h.producer for h in hypotheses})),
+        )
 
     def trace_version(self, version_id: str) -> TraceNode:
         """Trace one version through the analysis-wide memo.
@@ -150,7 +178,9 @@ class ProvenanceEngine:
                 progress_callback: Callable[[str, int, int, str], None] | None = None,
                 cancel_event: Any | None = None,
                 observation_callback: Callable[[str, int, tuple[ValueObservation, ...]], None]
-                | None = None) -> Analysis:
+                | None = None,
+                recursive: bool = True,
+                ignore_file_responses: bool = False) -> Analysis:
         from reqvexa.extraction import extract_observations
 
         def emit(stage: str, current: int, total: int, message: str) -> None:
@@ -175,6 +205,7 @@ class ProvenanceEngine:
             cancel_event=cancel_event,
             observation_callback=observation_callback,
             max_sequence=target_sequence,
+            ignore_file_responses=ignore_file_responses,
         )
         ignored = {item.lower().strip() for item in (ignored_hints or set()) if item.strip()}
         if ignored:
@@ -192,7 +223,9 @@ class ProvenanceEngine:
         body_texts: dict[str, str] = {}
         emit("scope", 1, 4, f"Collected {len(all_observations)} observations")
         observations = self._scope_observations(
-            capture, all_observations, target_request_id, response_by_request, body_texts
+            capture, all_observations, target_request_id, response_by_request,
+            body_texts, recursive=recursive,
+            ignore_file_responses=ignore_file_responses,
         )
         emit("versions", 2, 4, "Resolving logical values and versions")
         by_id = {observation.observation_id: observation for observation in observations}
@@ -248,7 +281,8 @@ class ProvenanceEngine:
                      "valid_from": version.valid_from, "valid_until": version.valid_until},
                 ))
         producers, negative = self._infer_producers(
-            capture, observations, versions, cancel_event, body_texts
+            capture, observations, versions, cancel_event, body_texts,
+            recursive=recursive, ignore_file_responses=ignore_file_responses,
         )
         self._add_edges(graph, capture, observations, versions, producers, negative, cancel_event)
         emit("complete", 4, 4, "Analysis complete")
@@ -257,14 +291,18 @@ class ProvenanceEngine:
         return Analysis(capture, observations, graph, versions, by_id, request_ids,
                         {key: tuple(value) for key, value in value_obs.items()},
                         producers, negative, logical_values,
-                        observation_value_ids, _index_versions_by_value(versions))
+                        observation_value_ids, _index_versions_by_value(versions),
+                        recursive=recursive)
 
     @staticmethod
     def _scope_observations(capture: Capture,
                             observations: tuple[ValueObservation, ...],
                             target_request_id: str | None,
                             response_by_request: dict[str, HttpResponse],
-                            body_texts: dict[str, str]) -> tuple[ValueObservation, ...]:
+                            body_texts: dict[str, str],
+                            recursive: bool = True,
+                            ignore_file_responses: bool = False
+                            ) -> tuple[ValueObservation, ...]:
         if target_request_id is None:
             return observations
         target = capture.request(target_request_id)
@@ -286,7 +324,8 @@ class ProvenanceEngine:
         }
         # Expand backwards by logical value. Once a request is relevant, all
         # of its state values become relevant too, including client-origin
-        # values that may remain unresolved.
+        # values that may remain unresolved. One-level mode keeps only the
+        # first expansion: found requests never seed further values.
         changed = True
         while changed:
             changed = False
@@ -306,6 +345,9 @@ class ProvenanceEngine:
                 response = response_by_request.get(request.id)
                 response_value_match = response_value_match or (
                     response is not None
+                    and not (
+                        ignore_file_responses and is_file_response(request, response)
+                    )
                     and any(
                         _response_contains_value(response, value, body_texts)
                         for value in selected_raw_values
@@ -313,13 +355,14 @@ class ProvenanceEngine:
                 )
                 if request_values & selected_values or response_value_match:
                     selected_requests.add(request.id)
-                    selected_values.update(request_values)
-                    selected_raw_values.update(
-                        item.normalized_value
-                        for item in request_observations.get(request.id, ())
-                        if item.response_id is None and _is_state_observation(item)
-                    )
-                    changed = True
+                    if recursive:
+                        selected_values.update(request_values)
+                        selected_raw_values.update(
+                            item.normalized_value
+                            for item in request_observations.get(request.id, ())
+                            if item.response_id is None and _is_state_observation(item)
+                        )
+                        changed = True
         scoped = [
             item for item in observations
             if (
@@ -365,7 +408,9 @@ class ProvenanceEngine:
     def _infer_producers(self, capture: Capture, observations: tuple[ValueObservation, ...],
                          versions: dict[str, ValueVersion],
                          cancel_event: Any | None = None,
-                         body_texts: dict[str, str] | None = None
+                         body_texts: dict[str, str] | None = None,
+                         recursive: bool = True,
+                         ignore_file_responses: bool = False
                          ) -> tuple[dict[str, tuple[ProducerHypothesis, ...]], dict[str, tuple[str, ...]]]:
         requests = {request.id: request for request in capture.requests}
         origins = {
@@ -480,7 +525,8 @@ class ProvenanceEngine:
                     method = "TRANSFORMED_MATCH"
             if not candidates and len(version.raw_value) >= 4:
                 candidates = self._raw_text_candidates(
-                    capture, requests, first_consumer, version.raw_value, body_texts
+                    capture, requests, first_consumer, version.raw_value, body_texts,
+                    ignore_file_responses=ignore_file_responses,
                 )
                 if candidates:
                     method = "RAW_TEXT_MATCH"
@@ -489,6 +535,14 @@ class ProvenanceEngine:
                 evidence_id = stable_id("evidence", version_id, "NO_PRIOR_RESPONSE_MATCH")
                 negative[version_id] = [evidence_id]
                 continue
+            if not recursive:
+                # One-level mode reports only where the value first appeared,
+                # not every later response that echoed it.
+                first_sequence = min(source.sequence for source in candidates)
+                candidates = [
+                    source for source in candidates
+                    if source.sequence == first_sequence
+                ]
             if method is None:
                 raise RuntimeError("Producer candidates were found without a match method")
             hypotheses: list[ProducerHypothesis] = []
@@ -529,12 +583,15 @@ class ProvenanceEngine:
         consumer: ValueObservation,
         value: str,
         text_cache: dict[str, str] | None = None,
+        ignore_file_responses: bool = False,
     ) -> list[ValueObservation]:
         candidates: list[ValueObservation] = []
         texts: dict[str, str] = text_cache if text_cache is not None else {}
         for response in capture.responses:
             source_request = requests.get(response.request_id)
             if source_request is None or source_request.sequence >= consumer.sequence:
+                continue
+            if ignore_file_responses and is_file_response(source_request, response):
                 continue
             if not _response_contains_value(response, value, texts):
                 continue

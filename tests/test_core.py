@@ -354,6 +354,49 @@ def test_flow_plan_contains_only_required_producers_and_target():
     assert plan.unresolved_values == ()
 
 
+def _first_appearance_capture():
+    """A -> B -> target chain with a later echo of B before the target."""
+    return HarProvider().load_json(har([
+        entry("GET", "https://example.test/bootstrap",
+              response=response(text='{"token":"A"}')),
+        entry("GET", "https://example.test/middle",
+              headers=[{"name": "X-Token", "value": "A"}],
+              response=response(text='{"session":"B"}')),
+        entry("GET", "https://example.test/echo",
+              response=response(text='{"session":"B"}')),
+        entry("GET", "https://example.test/target",
+              headers=[{"name": "X-Session", "value": "B"}]),
+    ]))
+
+
+def test_one_level_analysis_stops_at_first_appearance():
+    capture = _first_appearance_capture()
+    target = capture.requests[3]
+    recursive = ProvenanceEngine().analyze(capture, target_request_id=target.id)
+    one_level = ProvenanceEngine().analyze(
+        capture, target_request_id=target.id, recursive=False,
+    )
+
+    assert [step.sequence for step in plan_flow(recursive, target.id).steps] == [0, 1, 2, 3]
+    one_level_plan = plan_flow(one_level, target.id)
+    assert [step.sequence for step in one_level_plan.steps] == [1, 3]
+    assert one_level_plan.unresolved_values == ()
+
+    full_root = recursive.trace(target.id)[0]
+    flat_root = one_level.trace(target.id)[0]
+    assert full_root.children
+    assert flat_root.children == ()
+    assert len(flat_root.producer_ids) == 1  # the echo request is not repeated
+
+    report = safe_report(one_level, target.id)
+    assert report["plan"] == one_level_plan.to_dict()
+    assert len(report["values"]) == 1
+    assert "session" in report["values"][0]["name"]
+    assert [item["sequence"] for item in report["values"][0]["producers"]] == [1]
+    recursive_report = safe_report(recursive, target.id)
+    assert len(recursive_report["values"]) > len(report["values"])
+
+
 def test_safe_report_masks_values_and_removes_query_string():
     capture = HarProvider().load_json(har([
         entry("GET", "https://example.test/source",
@@ -402,6 +445,84 @@ def test_analysis_can_ignore_named_values():
     )
     assert any(version.raw_value == "A" for version in analysis.versions.values())
     assert not any(version.raw_value == "B" for version in analysis.versions.values())
+
+
+def test_file_response_filter_removes_static_response_values_from_matching():
+    capture = HarProvider().load_json(har([
+        entry(
+            "GET", "https://example.test/assets/bundle.js",
+            response=response(
+                text='{"token":"FILE-ONLY-TOKEN"}',
+                mime="application/javascript",
+            ),
+        ),
+        entry("GET", "https://example.test/target", headers=[
+            {"name": "X-Token", "value": "FILE-ONLY-TOKEN"},
+        ]),
+    ]))
+    target = capture.requests[1]
+    engine = ProvenanceEngine()
+
+    baseline = engine.analyze(capture, target_request_id=target.id)
+    baseline_observation = next(
+        item for item in baseline.observations
+        if item.request_id == target.id
+        and item.response_id is None
+        and item.normalized_value == "FILE-ONLY-TOKEN"
+    )
+    baseline_version = baseline._version_for_observation(
+        baseline_observation, target.sequence,
+    )
+    assert baseline_version is not None
+    assert baseline.target_producers[baseline_version.version_id]
+
+    filtered = engine.analyze(
+        capture, target_request_id=target.id, ignore_file_responses=True,
+    )
+    target_observation = next(
+        item for item in filtered.observations
+        if item.request_id == target.id
+        and item.response_id is None
+        and item.normalized_value == "FILE-ONLY-TOKEN"
+    )
+    version = filtered._version_for_observation(target_observation, target.sequence)
+    assert version is not None
+    assert version.version_id not in filtered.target_producers
+    assert not any(
+        item.request_id == capture.requests[0].id and item.response_id is not None
+        for item in filtered.observations
+    )
+    assert filtered.trace(target.id)[0].status == "UNKNOWN"
+
+
+def test_http2_pseudo_headers_are_not_extracted_as_regular_headers():
+    capture = HarProvider().load_json(har([
+        entry(
+            "GET", "https://example.test/path",
+            headers=[
+                {"name": ":method", "value": "GET"},
+                {"name": ":authority", "value": "example.test"},
+                {"name": ":path", "value": "/path"},
+                {"name": "X-Session", "value": "session-123"},
+            ],
+            response=response(
+                headers=[{"name": ":status", "value": "200"}],
+                text='{"token":"response-token"}',
+            ),
+        ),
+    ]))
+
+    observations = extract_observations(capture)
+    pseudo_names = {":method", ":authority", ":path", ":status"}
+    assert not any(
+        observation.location.path in pseudo_names
+        for observation in observations
+    )
+    assert any(
+        observation.location.path == "x-session"
+        and observation.normalized_value == "session-123"
+        for observation in observations
+    )
 
 
 def _lazy_fixture_document() -> dict:

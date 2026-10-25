@@ -18,6 +18,55 @@ TOKEN_HEADERS = {"authorization", "x-api-key", "x-auth-token", "x-csrf-token",
                  "x-csrf", "x-access-token", "x-signature"}
 SENSITIVE_HINTS = ("token", "secret", "password", "authorization", "cookie", "key", "signature")
 
+# Responses commonly served as static assets or downloads. This is an
+# opt-in analysis filter: request-side observations remain available, while
+# these responses are excluded as potential value producers.
+_FILE_RESPONSE_EXTENSIONS = frozenset({
+    ".7z", ".avif", ".bin", ".bmp", ".css", ".csv", ".doc", ".docx",
+    ".eot", ".gif", ".gz", ".ico", ".jpeg", ".jpg", ".js", ".map",
+    ".mov", ".mp3", ".mp4", ".ods", ".odt", ".otf", ".pdf", ".png",
+    ".ppt", ".pptx", ".rar", ".svg", ".tar", ".tif", ".tiff", ".ttf",
+    ".wasm", ".wav", ".webm", ".webp", ".woff", ".woff2", ".xls",
+    ".xlsx", ".xml", ".zip",
+})
+_FILE_RESPONSE_MIME_TYPES = frozenset({
+    "application/octet-stream",
+    "application/pdf",
+    "application/wasm",
+    "application/zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/x-tar",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+})
+
+
+def is_file_response(request: Any, response: Any) -> bool:
+    """Whether a response looks like a static asset or downloadable file."""
+    mime_type = (response.mime_type or "").split(";", 1)[0].strip().lower()
+    if (
+        mime_type in _FILE_RESPONSE_MIME_TYPES
+        or mime_type.startswith(("image/", "audio/", "video/", "font/"))
+        or mime_type in {"application/font-woff", "application/font-woff2"}
+    ):
+        return True
+    path = urlsplit(request.url).path.lower()
+    if PurePosixPath(path).suffix in _FILE_RESPONSE_EXTENSIONS:
+        return True
+    return any(
+        header.name.lower() == "content-disposition"
+        and ("attachment" in header.value.lower() or "filename=" in header.value.lower())
+        for header in response.headers
+    )
+
 
 @dataclass(frozen=True)
 class ExtractionConfig:
@@ -31,7 +80,9 @@ def extract_observations(capture: Capture,
                          progress_callback: Any | None = None,
                          cancel_event: Any | None = None,
                          observation_callback: Any | None = None,
-                         max_sequence: int | None = None) -> tuple[ValueObservation, ...]:
+                         max_sequence: int | None = None,
+                         ignore_file_responses: bool = False
+                         ) -> tuple[ValueObservation, ...]:
     config = config or ExtractionConfig()
     observations: list[ValueObservation] = []
     responses = {response.id: response for response in capture.responses}
@@ -52,9 +103,12 @@ def extract_observations(capture: Capture,
             )
         before_count = len(observations)
         observations.extend(_request_observations(request, config, cancel_event))
-        if request.response_id and request.response_id in responses:
+        response = responses.get(request.response_id) if request.response_id else None
+        if response is not None and not (
+            ignore_file_responses and is_file_response(request, response)
+        ):
             observations.extend(_response_observations(
-                request, responses[request.response_id], config, cancel_event
+                request, response, config, cancel_event
             ))
         if observation_callback is not None:
             observation_callback(
@@ -104,6 +158,10 @@ def _request_observations(request: Any, config: ExtractionConfig,
             raise AnalysisCancelled()
         name = header.name.lower()
         value = header.value
+        if name.startswith(":"):
+            # HTTP/2 pseudo-headers repeat request metadata such as :method
+            # and :path; they are not application state or ordinary headers.
+            continue
         if name == "cookie":
             for cookie_name, cookie_value in _parse_cookie_header(value):
                 header_cookies.add((cookie_name.lower(), cookie_value))
@@ -150,6 +208,8 @@ def _response_observations(request: Any, response: Any,
         if cancel_event is not None and cancel_event.is_set():
             raise AnalysisCancelled()
         name = header.name.lower()
+        if name.startswith(":"):
+            continue
         if name == "set-cookie":
             cookie = _parse_set_cookie(header.value)
             if cookie:
@@ -396,11 +456,31 @@ def _parse_cookie_header(value: str) -> Iterable[tuple[str, str]]:
 
 
 def _parse_set_cookie(value: str) -> Cookie | None:
-    first = value.split(";", 1)[0]
+    parts = [part.strip() for part in value.split(";")]
+    first = parts[0]
     if "=" not in first:
         return None
     name, cookie_value = first.split("=", 1)
-    return Cookie(name.strip(), cookie_value.strip())
+    attributes: dict[str, str | None] = {}
+    for attribute in parts[1:]:
+        key, separator, attribute_value = attribute.partition("=")
+        attributes[key.strip().lower()] = (
+            attribute_value.strip() if separator else None
+        )
+    domain = attributes.get("domain")
+    if domain:
+        domain = domain.lstrip(".")
+    else:
+        domain = None
+    path = attributes.get("path")
+    return Cookie(
+        name.strip(),
+        cookie_value.strip(),
+        domain=domain,
+        path=path,
+        secure="secure" in attributes,
+        host_only=domain is None,
+    )
 
 
 def _header(headers: tuple[Header, ...], name: str) -> str | None:

@@ -49,9 +49,17 @@ class FlowPlan:
 
 
 def plan_flow(analysis: Analysis, target_request_id: str,
-              trace: tuple[TraceNode, ...] | None = None) -> FlowPlan:
+              trace: tuple[TraceNode, ...] | None = None,
+              recursive: bool | None = None) -> FlowPlan:
+    """Plan the requests needed for one target.
+
+    ``recursive=False`` keeps only the target and the first request each of
+    its values appeared in; ``None`` inherits the analysis depth.
+    """
+    if recursive is None:
+        recursive = analysis.recursive
     if trace is None:
-        trace = analysis.trace(target_request_id)
+        trace = analysis.trace(target_request_id, recursive=recursive)
     required_versions = _trace_versions(trace)
     request_ids: set[str] = {target_request_id}
     matching = _observation_versions(analysis)
@@ -79,7 +87,8 @@ def plan_flow(analysis: Analysis, target_request_id: str,
                 producer_request_id = _producer_request_id(analysis, hypothesis.producer)
                 if producer_request_id not in request_ids:
                     request_ids.add(producer_request_id)
-                    queue.append(producer_request_id)
+                    if recursive:
+                        queue.append(producer_request_id)
 
     # Logical-value names repeat across steps; resolve each one once.
     names: dict[str, str] = {}
@@ -124,7 +133,12 @@ def plan_flow(analysis: Analysis, target_request_id: str,
             produces=tuple(produced),
         ))
 
-    flow_version_ids = _flow_version_ids(analysis, tuple(steps))
+    # One-level plans care only about the target's own values; recursive
+    # plans include everything the prerequisite requests consume too.
+    flow_version_ids = (
+        _flow_version_ids(analysis, tuple(steps)) if recursive
+        else required_versions
+    )
     # ``status == "UNKNOWN"`` holds for a flow version exactly when it has no
     # producer hypotheses (every other root status derives from them), so the
     # unresolved set needs no per-version trace walk: walking each flow
@@ -145,14 +159,23 @@ def plan_flow(analysis: Analysis, target_request_id: str,
 
 
 def safe_report(analysis: Analysis, target_request_id: str,
-                unsafe_raw: bool = False) -> dict[str, Any]:
+                unsafe_raw: bool = False,
+                recursive: bool | None = None) -> dict[str, Any]:
+    if recursive is None:
+        recursive = analysis.recursive
     # The trace feeds both the plan and the value table; compute it once and
     # let plan_flow reuse it instead of retracing the identical graph.
-    trace = analysis.trace(target_request_id)
-    plan = plan_flow(analysis, target_request_id, trace=trace)
+    trace = analysis.trace(target_request_id, recursive=recursive)
+    plan = plan_flow(
+        analysis, target_request_id, trace=trace, recursive=recursive,
+    )
     trace_nodes = dict(_trace_nodes(trace))
-    for version_id in _flow_version_ids(analysis, plan.steps):
-        trace_nodes.setdefault(version_id, analysis.trace_version(version_id))
+    if recursive:
+        # Producer requests in the plan consume their own values too; include
+        # them for a complete report. One-level reports stay limited to the
+        # target's values.
+        for version_id in _flow_version_ids(analysis, plan.steps):
+            trace_nodes.setdefault(version_id, analysis.trace_version(version_id))
     values: list[dict[str, Any]] = []
     edge_methods = _index_edge_methods(analysis.graph.edges)
     for node in sorted(trace_nodes.values(), key=lambda item: (item.value_id, item.version_id)):
