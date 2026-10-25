@@ -54,6 +54,7 @@ should come with a new benchmark case in `tests/benchmark/cases/__init__.py`.
 
 ## Releasing
 
-Tag with `vX.Y.Z`. The `release.yml` workflow builds the sdist and wheel and
-attaches them to the matching GitHub release. Update `CHANGELOG.md` and the
-README badges in the release commit.
+Update `CHANGELOG.md`, the project version in `pyproject.toml`, and the README
+version badge in the release commit. Tag the matching PEP 440 version with a
+`v` prefix (for example, `v0.2.0a1` for an alpha). The `release.yml` workflow
+builds the sdist and wheel and attaches them to the matching GitHub release.

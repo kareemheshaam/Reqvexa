@@ -4,6 +4,7 @@
   <p>
     <a href="https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml"><img src="https://github.com/kareemheshaam/Reqvexa/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
     <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-3776AB.svg" alt="Python 3.12+"></a>
+    <a href="https://github.com/kareemheshaam/Reqvexa/releases"><img src="https://img.shields.io/badge/version-0.2.0a1-orange.svg" alt="Version 0.2.0a1 alpha"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
     <a href="#development"><img src="https://img.shields.io/badge/synthetic%20benchmark-16%2F16%20passing-brightgreen.svg" alt="Synthetic benchmark: 16/16 passing"></a>
   </p>
@@ -33,8 +34,9 @@ Required state
 └── x-signature   <- unresolved client-side value
 ```
 
-The project is currently an alpha release. It is focused on explaining
-captured traffic, not generating a client or replaying requests.
+The current project version is `0.2.0a1` (alpha). Reqvexa explains captured
+traffic and exports selected request flows or standalone requests as Python
+using `tls_client`; Reqvexa itself does not send or replay those requests.
 
 ## What It Does
 
@@ -46,8 +48,12 @@ captured traffic, not generating a client or replaying requests.
   cookies, independent of response MIME type, JSON shape, or origin.
 - Handles URL-decoded, Base64/base64url, and `Bearer`-prefix representations.
 - Tracks mutable values by temporal versions and records evidence/confidence.
-- Expands prerequisite requests recursively and keeps unresolved values
-  visible instead of guessing their source.
+- Expands prerequisite requests recursively by default, with an optional
+  one-level mode that stops at each value's first producer, and keeps
+  unresolved values visible instead of guessing their source.
+- Generates an ordered Python `tls_client` flow from selected analysis
+  requests or a standalone script for one selected request, with synchronous
+  and asynchronous output modes.
 - Provides CLI output and an optional Flet desktop viewer with Traffic, Logs,
   and Analysis tabs.
 
@@ -169,6 +175,8 @@ report = safe_report(analysis, target.id)
 ```
 
 The analysis reads the capture from disk and does not make network requests.
+Pass `recursive=False` to `analyze` to stop at each value's first producer;
+`plan_flow` and `safe_report` inherit that depth unless told otherwise.
 
 ## Development
 
@@ -186,7 +194,7 @@ The repository includes a deterministic benchmark:
 python -c "from tests.benchmark.runner import run_benchmark; print(run_benchmark())"
 ```
 
-Current checks pass with 84 tests and 16 benchmark cases. The benchmark uses
+Current checks pass with 152 tests and 16 benchmark cases. The benchmark uses
 synthetic traffic; `16/16 passing` is a regression result, not a claim about
 accuracy on every real-world HAR.
 
@@ -207,16 +215,20 @@ Implemented:
 - Raw-text matching in earlier responses, including URL/Base64/Bearer forms.
 - Temporal versions, evidence-bearing provenance, and recursive flow plans.
 - Reports in JSON, markdown, and Mermaid formats.
+- Selectable request-flow export as synchronous or asynchronous Python using
+  `tls_client`, plus standalone single-request scripts.
 - CLI and optional Flet GUI with live logs, analysis tabs, cancellation, and
   masked output.
 
-Not included in this release:
+Not included in this alpha:
 
-- Request replay or generated API clients.
+- Executing replay requests from within Reqvexa; generated scripts are
+  exported for the user to review and run separately.
 - Browser/Playwright capture.
 - Automatic JavaScript execution or cryptographic signature reconstruction.
 
-The first release is tagged `v0.1.0-alpha`.
+The initial alpha was tagged `v0.1.0-alpha`. The current project version is
+`0.2.0a1`.
 
 ## License
 

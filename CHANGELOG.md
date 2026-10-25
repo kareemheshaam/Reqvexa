@@ -5,8 +5,33 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0a1] - 2026-10-25
+
 ### Added
 
+- Python request-flow generation from the Analysis tab. Each planned request
+  can be selected or unselected, and the generated `tls_client` code supports
+  synchronous and asynchronous execution. Ordered headers, cookies, bodies,
+  HTTP/1 settings, and HTTP/2 pseudo-header normalization are included; the
+  preview supports copy and `.py` save.
+- Standalone single-request generation for exactly one selected request. The
+  exported script uses a direct `tls_client` method call, preserves captured
+  header order and raw request bodies, and supports synchronous and asynchronous
+  output without including the surrounding flow.
+- Request-search criteria to limit matching to selected request and response
+  areas, including query parameters, post data, headers, and response content.
+- Flow generation follows captured response dependencies: response cookies use
+  the session cookie jar, response-header values are read from their producer,
+  and response-body values are exposed as manual placeholders. Encoding and
+  decoding needed to match captured values is included in generated flow code.
+- Optional one-level analysis: the GUI "Recursive" switch (on by default)
+  turns off the backward expansion through found requests. With it off,
+  `ProvenanceEngine.analyze(..., recursive=False)` scopes the capture to
+  the target and the first request whose response held each of its values,
+  `plan_flow`/`safe_report` (which inherit the analysis depth) include only
+  those direct first producers, and traces stop at one level - a long
+  session-cookie echo no longer pulls every prior consumer into the plan.
+  The Analysis tab labels each result "recursive" or "one level".
 - Manual analysis tab: clicking a value in the traffic or analysis
   inspector (header, cookie, query parameter, or a JSON body
   string/number) searches the capture for the first strictly-earlier
@@ -27,6 +52,24 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of the reference capture runs instantly, and a full not-found scan of
   all earlier entries takes ~0.2s. Trace values stay masked unless
   "Show sensitive values" is on.
+- Optional one-level value sweep on the Manual tab: instead of clicking
+  values one by one, pressing "Sweep values" searches the first earlier
+  appearance of every traceable value on the open or traffic-selected
+  request in one pass - header, cookie, and query values, urlencoded
+  form field values, and JSON body scalars (the same exact-literal,
+  name-agnostic search a click runs, with every sweep hit equal to the
+  per-value manual search result, verified by test). Still one level
+  deep by design: found requests land on the chain but their values are
+  never searched automatically, so recursion remains a user decision;
+  dead ends are recorded as their own cards. The sweep parses each
+  earlier entry once for all remaining values (body texts decode once)
+  instead of one pass per value, streams progress into the status line,
+  switches to the Manual tab, opens the swept request in its inspector,
+  and reports "N values traced, M dead ends, K earlier entries checked".
+  On the reference capture it sweeps request #552 (64 values, 62 traced)
+  in 0.19s. Clear/capture-reload invalidate an in-flight sweep, repeated
+  sweeps deduplicate against hops already on the chain, and values stay
+  masked unless "Show sensitive values" is on.
 - `reqvexa requests` subcommand that lists request IDs, methods, and redacted
   paths so `--request` values can be discovered from the CLI.
 - `--request` selectors: accept a request ID, an entry index (including
@@ -55,11 +98,25 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   canonical name forms (request keys, `X-*` response headers,
   cookie./CSRF/Bearer aliases) match a checked name, so a value selected
   on one request can no longer reappear under a different name shape
-  elsewhere. The GUI ignore panel now also lists the target response's
-  header and Set-Cookie names (the raw Set-Cookie header name is skipped,
-  parsed cookie names are selectable instead), selections persist across
-  request switches, and persisted picks from other requests surface in an
-  "Also ignoring (N from other requests)" footer line.
+  elsewhere. The Analysis Control dialog lists only fields on the selected
+  target request (response values are producers, not target inputs), with
+  selections persisting across request switches and prior exclusions shown
+  in an "Also excluded" note.
+- Analysis Control groups target fields into Cookies, Headers, Payload, and
+  Parameters. Checked fields are included in tracing; select-all and
+  unselect-all update the persistent selections. The control opens in a dialog
+  from either the Analysis tab or the pre-analysis confirmation dialog, which
+  also holds the Recursive, Show sensitive values, and Ignore file responses
+  options.
+- HTTP/2 pseudo-headers are shown separately in request previews and excluded
+  from ordinary-header extraction and analysis controls.
+- Optional "Ignore file responses" analysis filter excludes static assets and
+  downloadable responses from producer matching without removing request-side
+  observations.
+- New analysis results are focused when complete; request previews in Analysis
+  now include value-copy controls. Manual result cards open the full captured
+  request/response, and entries without a status code are labeled as unavailable
+  instead of misleadingly displaying HTTP 0.
 - Lazy HAR loading in the GUI: a file load builds a byte-offset index
   over `log.entries` and keeps only request/response metadata resident
   (methods, URLs, statuses beside the request list); the full content of
@@ -131,7 +188,7 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   71,976-observation capture no longer stalls the UI thread after the final
   extraction tick.
 
-## [0.1.0-alpha] - Initial release
+## [0.1.0-alpha] - 2026-08-29
 
 - HAR 1.2 parsing, value extraction, temporal versions, provenance inference,
   CLI (`analyze`, `trace`, `graph`, `plan`, `report`) and Flet GUI.

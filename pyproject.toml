@@ -1,6 +1,6 @@
 [project]
 name = "reqvexa"
-version = "0.1.0"
+version = "0.2.0a1"
 description = "Deterministic request state provenance for captured browser traffic."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,7 +12,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -33,7 +32,7 @@ build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.11"]
-gui = ["flet>=0.28"]
+gui = ["flet>=1.0.5,<2.0"]
 
 [project.scripts]
 reqvexa = "reqvexa.cli:main"
